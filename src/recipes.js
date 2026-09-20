@@ -588,18 +588,18 @@ const APKGO_RECIPES = [
     noManual: true,
     hideWizardFields: true,
     progressOrder: ["goto", "filling", "saving", "done"],
-    progressLabels: { filling: "生成并获取 Client ID 与 Secret", saving: "保存到配置平台并验证" },
-    wizardHint: "助手会自动在凭据管理页面生成 API 客户端凭证（Client ID 与 Secret），并自动保存与验证。",
-    doneBtnText: "重新获取并保存",
-    doneHint: "已自动保存并验证荣耀开发者服务平台凭据。",
+    progressLabels: { filling: "获取 Client ID 与 Secret", saving: "保存到配置平台并验证" },
+    wizardHint: "助手会先取用凭据管理页里已有的 API 客户端凭证（Client ID 与 Secret），没有才新生成，然后自动保存与验证。",
+    doneBtnText: "重新生成并保存",
+    doneHint: "已保存并验证荣耀开发者服务平台凭据。点上方按钮会在后台新生成一对凭据。",
     prereq: [
       "请登录荣耀开发者服务平台开发者账号（管理员）",
-      "自动通过官方后台接口生成 API 密钥凭证并自动提取",
+      "优先取用后台已有的 API 密钥凭证，没有才通过官方后台接口新生成",
     ],
     steps: [
       { t: "登录荣耀开发者服务平台", d: "用管理员账号。" },
       { t: "进入凭据管理页面", d: "https://developer.honor.com/cn/manageCenter/certificate?cardRouteCode=E00069&~id=69" },
-      { t: "一键生成并获取凭证", d: "自动生成 API 凭证并提取 Client ID 和 Secret 保存到配置平台验证。" },
+      { t: "一键获取凭证", d: "优先取用已有的 API 凭证，没有才新生成，提取 Client ID 和 Secret 保存到配置平台验证。" },
     ],
     fields: [
       { key: "clientId", label: "Client ID", kind: "text", hints: [/client[\s_-]*id/i, /客户端\s*ID/i], pattern: /^[A-Za-z0-9]{6,}$/, required: true },
@@ -624,12 +624,17 @@ const APKGO_RECIPES = [
           throw new Error("检测到您尚未登录荣耀开发者服务平台，请先登录开发者账号后再获取密钥。");
         }
 
+        const idOk = (x) => /^[A-Za-z0-9]{6,}$/.test(x);
+        const secretOk = (x) => /^[A-Za-z0-9]{16,}$/.test(x);
+        // 荣耀后台自己发的请求都带这个自定义头，跟着带上。
+        const HDRS = { "Accept": "application/json, text/plain, */*", "terminal-lang": "cn" };
+
         // 步骤 1：获取 CSRF Token
         const getCsrfToken = async () => {
           try {
             const res = await fetch("https://developer.honor.com/portal/auth/csrf?withSite=true", {
               method: "GET",
-              headers: { "Accept": "application/json, text/plain, */*" },
+              headers: HDRS,
               credentials: "include",
             });
             if (res.ok) {
@@ -647,11 +652,7 @@ const APKGO_RECIPES = [
           try {
             const res = await fetch("https://developer.honor.com/portal/auth/genAuthenticate", {
               method: "POST",
-              headers: {
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json;charset=UTF-8",
-                "developer-csrftoken": csrfToken,
-              },
+              headers: { ...HDRS, "Content-Type": "application/json;charset=UTF-8", "developer-csrftoken": csrfToken },
               body: JSON.stringify({ type: 2 }),
               credentials: "include",
             });
@@ -665,13 +666,73 @@ const APKGO_RECIPES = [
           return null;
         };
 
+        // 列出后台已有的 API 密钥凭据（type 2，和 genAuthenticate 同一类）。
+        // 返回里的 clientSecret 是掩码（一串 *），只有 id 能用来换明文，见 revealSecret。
+        const listExisting = async (csrfToken) => {
+          try {
+            const res = await fetch("https://developer.honor.com/portal/auth/queryAuthenticate/2", {
+              method: "GET",
+              headers: { ...HDRS, "developer-csrftoken": csrfToken },
+              credentials: "include",
+            });
+            const d = res.ok ? await res.json() : null;
+            if (d && (d.code === "200" || d.code === 200) && Array.isArray(d.data)) return { list: d.data };
+            return { list: [], error: d ? `${d.code} ${d.msg || ""}`.trim() : `HTTP ${res.status}` };
+          } catch (e) {
+            return { list: [], error: e.message || String(e) };
+          }
+        };
+
+        // 换一条记录的明文 clientSecret：就是凭证页上「复制」按钮背后的接口
+        // （2026-09-20 在真实后台核对）。拿不到就返回空，由调用方回退去新建。
+        const revealSecret = async (csrfToken, id) => {
+          try {
+            const q = `?bizType=authenticate_clientSecret_info&id=${encodeURIComponent(id)}&fieldName=clientSecret&pageName=${encodeURIComponent("/cn/manageCenter/certificate")}`;
+            const res = await fetch("https://developer.honor.com/portal/common/getOriginalData" + q, {
+              method: "GET",
+              headers: { ...HDRS, "developer-csrftoken": csrfToken },
+              credentials: "include",
+            });
+            const d = res.ok ? await res.json() : null;
+            if (d && (d.code === "200" || d.code === 200) && typeof d.data === "string" && secretOk(d.data)) return { secret: d.data };
+            return { error: d ? `${d.code} ${d.msg || ""}`.trim() : `HTTP ${res.status}` };
+          } catch (e) {
+            return { error: e.message || String(e) };
+          }
+        };
+
         const csrf = await getCsrfToken();
         if (csrf) {
+          // 步骤 2：先取用后台已有的凭据。genAuthenticate 是纯生成接口，每调一次后台就多
+          // 一对凭据，用户只是来采集时没必要白生成一把。
+          // 「重新生成并保存」是用户明确要换一把，这时跳过复用直接往下生成。
+          if (!h.isReset) {
+            const { list, error } = await listExisting(csrf);
+            let why = error ? `查不到已有凭据（${error}）` : "";
+            for (const rec of list) {
+              if (!rec || !rec.id || !idOk(String(rec.clientId || ""))) continue;
+              const got = await revealSecret(csrf, rec.id);
+              if (!got.secret) { why = why || `明文取不回（${got.error}）`; continue; }
+              h.draft.config.clientId = String(rec.clientId);
+              h.draft.config.clientSecret = got.secret;
+              return `已取用荣耀后台里现有的 API 凭据（Client ID: ${rec.clientId}）！正在保存并验证…`;
+            }
+            // 查不到列表、或明明有凭据却一条都取不回明文：停下来说清楚，不闷声新建一把。
+            // 荣耀是每建一条就多一条，用户要的是复用，得让他自己决定要不要新建。
+            // why 为空才说明后台确实一条凭据都没有，那种情况下新建是对的。
+            if (why && !h.draft.honorRetried) {
+              h.draft.honorRetried = true;
+              throw new Error(`助手没能复用荣耀后台已有的 API 凭据：${why}。` +
+                `再点一次「一键获取密钥」就新建一对（已有的保留不动）。`);
+            }
+          }
+
+          // 步骤 3：后台没有可用的现成凭据（或用户已确认要新建），才生成一对。
           const auth = await genAuth(csrf);
           if (auth && auth.clientId && auth.clientSecret) {
             h.draft.config.clientId = String(auth.clientId);
             h.draft.config.clientSecret = String(auth.clientSecret);
-            return `已成功生成并获取荣耀 API 凭据（Client ID: ${auth.clientId}）！正在保存并验证…`;
+            return `已新生成荣耀 API 凭据（Client ID: ${auth.clientId}）！正在保存并验证…`;
           }
         }
 
