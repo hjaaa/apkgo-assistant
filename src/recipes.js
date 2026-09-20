@@ -1,20 +1,43 @@
 // 每家商店一份「配方」：后台域名、入口页、前置条件、步骤、要采集的字段。
 //
-// 加一家商店 = 加一个对象。字段的 key 必须和 apkgo store schema 的 key 一致
-// （GET https://apkgo.baici.tech/api/v1/stores/schemas 可以看到全部）。
+// 加一家商店 = 加一个对象。字段的 key 必须和配置平台（dream-product）对应渠道
+// Config 类的属性名一致（dream-product-api 的 api.dto.openplatform 包，驼峰）：
+//   huawei  keyId / privateKey / subAccount / projectId（由下载的 JSON 拆出，见 parseHuaweiServiceAccount）
+//   xiaomi  userName / privateKey / publicKey（publicKey 内置）
+//   oppo    clientId / clientSecret
+//   vivo    accessKey / accessSecret
+//   honor   clientId / clientSecret
+//   qq      userId / accessSecret
 // kind:
 //   text      单行明文（ID 之类）
 //   secret    单行密文（secret / key）
 //   multiline 多行密文（PEM 私钥），不能用单行输入框，会被吃掉换行
-//   file-b64  选文件 → base64（apkgo 对应字段接受 base64）
-//   file-text 选文件 → 原文（PEM）
+//   file-b64  选文件 → base64
+//   file-text 选文件 → 原文（JSON / PEM）
 // hints 是自动识别时匹配页面上标签文字的正则；pattern 用来过滤识别到的值。
-// 各家后台会改版，菜单名和入口 URL 以实际为准——错了请提 PR，改这个文件就行。
+// 各家后台会改版，菜单名和入口 URL 以实际为准——错了改这个文件就行。
+//
+// verified: true = 已在真实后台完整跑通，才会在页面上出助手入口。配置平台只有这六个渠道。
+// 商店后台里由助手创建的凭据（华为 Service Account、OPPO 服务端应用）仍命名为 apkgo：
+// 那是后台里的名字，不是产品文案，保持不变以免影响已验证的流程。
 
-// verified: true = 已在真实后台完整跑通，才会在页面上出助手入口。
-// 其余几家（魅族 / Samsung / App Store / Google Play）步骤是照文档写的、没实登核对过，
-// 所以既不在 manifest 的 matches 里（不注入），也不在弹窗里出现；先留着，等哪天
-// 实登验证过，给它加上 verified: true 并把域名加回 manifest 即可。
+// 小米开放平台下发的公钥对所有开发者相同：dev.api.public.cer 去掉 PEM 头尾与换行后的裸base64。
+// 后端用它做 RSA 加密生成 SIG；平台前端手动上传公钥文件时也是这么处理的。
+const XIAOMI_PUBLIC_KEY = "MIICsjCCAhugAwIBAgIUbANcYrk1DOkSSBAxRZo+FcIru9wwDQYJKoZIhvcNAQEEBQAwajELMAkGA1UEBhMCQ04xEDAOBgNVBAgMB0JlaUppbmcxEDAOBgNVBAcMB0JlaUppbmcxDzANBgNVBAoMBnhpYW9taTENMAsGA1UECwwEbWl1aTEXMBUGA1UEAwwOZGV2LnhpYW9taS5jb20wIBcNMjMwMjIxMDIwOTA2WhgPMjEyMzAxMjgwMjA5MDZaMGoxCzAJBgNVBAYTAkNOMRAwDgYDVQQIDAdCZWlKaW5nMRAwDgYDVQQHDAdCZWlKaW5nMQ8wDQYDVQQKDAZ4aWFvbWkxDTALBgNVBAsMBG1pdWkxFzAVBgNVBAMMDmRldi54aWFvbWkuY29tMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDAX+S8xIjMtIvC3hDV1Pb9G0xeHKDP5C3yukb41kuvf+rVMTcSb4wxTWy7JlOMaRd6hWPUSNKskX+/aZin2FHlqJkAjP4SqNpSiG1le/0VYXmYRAtshm1DEcoCMyatwAoQU9jDtWu2wPSyDXL/sS5qMufpdzJ1cG1VKVrAvxiOfQIDAQABo1MwUTAdBgNVHQ4EFgQUSerMKItNhZ/Od9mhtMVd4vE/pBEwHwYDVR0jBBgwFoAUSerMKItNhZ/Od9mhtMVd4vE/pBEwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQQFAAOBgQCpyfyMQ1tXgiwbd6j4kU8suUwwFdRcpnjoABwndExs38XF7EoLcHFHpt3WUmIs4fdnOD6+549n0usGOCkRb8H47P7Y+qnJgH/YM42sZEp4vVHczr7MyOquQC/ZO5gnAwaYoVMkKqs06u5dP/MMoedva3PCu9tBkNSQpAnle2BiYg==";
+
+// 华为 AGC 下载的 *_private.json → 配置平台要的四个字段；与平台前端手动上传的解析规则一致。
+// 返回 { config } 或 { error }。
+function parseHuaweiServiceAccount(text) {
+  let json;
+  try { json = JSON.parse(text); } catch { return { error: "凭据文件不是合法的 JSON" }; }
+  if (!json || typeof json !== "object") return { error: "凭据文件不是合法的 JSON" };
+  const keyId = json.key_id || json.keyId;
+  const privateKey = json.private_key || json.privateKey;
+  const subAccount = json.sub_account || json.subAccount;
+  if (!keyId || !privateKey || !subAccount) return { error: "凭据文件无效，缺少 key_id / private_key / sub_account 字段" };
+  return { config: { keyId: String(keyId), privateKey: String(privateKey), subAccount: String(subAccount), projectId: String(json.project_id || json.projectId || "") } };
+}
+
 const APKGO_RECIPES = [
   {
     id: "huawei", verified: true, cn: "华为", product: "AppGallery Connect",
@@ -24,13 +47,16 @@ const APKGO_RECIPES = [
     prereq: ["需要团队管理员账号，否则顶部没有「用户与访问」", "华为提示「API 客户端」即将被 Service Account 替代，新建请选 Service Account"],
     steps: [
       { t: "登录 AppGallery Connect，顶部点「用户与访问」", d: "" },
-      { t: "左侧「API密钥 → Connect API」，停在「Service Account」页签", d: "列表里能看到已有的服务账号；apkgo 需要一个「开发者级 · APP管理员」的。", action: "goto" },
+      { t: "左侧「API密钥 → Connect API」，停在「Service Account」页签", d: "列表里能看到已有的服务账号；配置平台需要一个「开发者级 · APP管理员」的。", action: "goto" },
       { t: "点「创建」，填名称、选「开发者级」、勾「APP管理员」", d: "「帮我点」会打开弹窗并填好，最后的「确认」留给你点。", action: "open-create" },
       { t: "点「确认」后下载 JSON，面板会自动抓到这个文件", d: "没抓到就手动「选文件」。JSON 只能下载一次。" },
     ],
     fields: [
-      { key: "service_account", label: "服务账号 JSON 文件", kind: "file-b64", accept: ".json,application/json", required: true, capture: { name: /\.json$/i, mime: /json/i } },
+      { key: "serviceAccountJson", label: "服务账号 JSON 文件", kind: "file-text", accept: ".json,application/json", required: true, capture: { name: /\.json$/i, mime: /json/i } },
     ],
+    // 采到的是整个 JSON 文本；保存前先校验，提交时拆成配置平台要的四个字段。
+    validate(cfg) { return cfg.serviceAccountJson ? (parseHuaweiServiceAccount(cfg.serviceAccountJson).error || "") : ""; },
+    finalize(config) { return parseHuaweiServiceAccount(config.serviceAccountJson).config; },
     isLoggedIn: async (h) => {
       if (/login|id\d*\.cloud\.huawei\.com|portal\/loginAuth/i.test(location.href)) return false;
       for (const doc of h.docs()) {
@@ -118,15 +144,15 @@ const APKGO_RECIPES = [
     prereq: [
       "请用主账号；团队子账号可能没有「自动发布」入口",
       "私钥每次「重置」都会变，重置后要重新采集",
-      "公钥由 apkgo 内置，无需下载上传",
+      "公钥由助手内置，无需下载上传",
     ],
     doneBtnText: "重置私钥并重新保存",
-    doneHint: "小米仅支持一把私钥；重置后旧私钥失效，点击上方按钮将自动在后台重置并同步至 apkgo。",
+    doneHint: "小米仅支持一把私钥；重置后旧私钥失效，点击上方按钮将自动在后台重置并同步至配置平台。",
     wizardHint: "全自动流程：扩展会自动调取开发者邮箱并提取私钥（未生成时自动生成），直接保存并验证。",
     progressOrder: ["goto", "filling", "saving", "done"],
     progressLabels: {
       filling: "自动获取邮箱与私钥",
-      saving: "保存到 apkgo 并验证",
+      saving: "保存到配置平台并验证",
     },
     steps: [
       { t: "登录小米开放平台 → 管理中心", d: "用主账号。" },
@@ -134,8 +160,8 @@ const APKGO_RECIPES = [
       { t: "获取邮箱与私钥，保存并验证", d: "扩展会自动从后台调取开发者邮箱并提取私钥。", action: "fetch-key" },
     ],
     fields: [
-      { key: "email", label: "开发者账号邮箱", kind: "text", hints: [/邮箱|e-?mail|账号/i], pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/, required: true },
-      { key: "private_key", label: "私钥", kind: "secret", hints: [/私钥|private\s*key|password|密码/i], pattern: /^[A-Za-z0-9+/=_-]{16,}$/, required: true },
+      { key: "userName", label: "开发者账号邮箱", kind: "text", hints: [/邮箱|e-?mail|账号/i], pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/, required: true },
+      { key: "privateKey", label: "私钥", kind: "secret", hints: [/私钥|private\s*key|password|密码/i], pattern: /^[A-Za-z0-9+/=_-]{16,}$/, required: true },
     ],
     preload: async () => {
       try {
@@ -147,7 +173,7 @@ const APKGO_RECIPES = [
         if (!r.ok) return null;
         const d = await r.json();
         const email = d && d.data && d.data.email;
-        if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { email };
+        if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { userName: email };
       } catch { /* ignore */ }
       return null;
     },
@@ -161,7 +187,7 @@ const APKGO_RECIPES = [
           const r = await fetch(url, { credentials: "include" });
           if (r.ok) {
             const d = await r.json();
-            if (d && d.data && d.data.email) out.email = d.data.email;
+            if (d && d.data && d.data.email) out.userName = d.data.email;
           }
         }
       } catch { /* ignore */ }
@@ -170,9 +196,9 @@ const APKGO_RECIPES = [
         const text = (doc.body && doc.body.innerText) || "";
         const matches = text.match(/\b[a-zA-Z0-9]{40,64}\b/g) || [];
         for (const m of matches) {
-          if (!/已生成|mideveloper|openplatform/i.test(m)) { out.private_key = m; break; }
+          if (!/已生成|mideveloper|openplatform/i.test(m)) { out.privateKey = m; break; }
         }
-        if (out.private_key) break;
+        if (out.privateKey) break;
       }
       return out;
     },
@@ -195,22 +221,22 @@ const APKGO_RECIPES = [
         // 1. 登录检查与调取邮箱
         const phMatch = document.cookie.match(/mideveloper_ph=([^;]+)/);
         const uidMatch = document.cookie.match(/\buserId=([^;]+)/);
-        if (/login|account\.xiaomi\.com/i.test(location.href) || (!phMatch && !uidMatch && !h.draft.config.email)) {
+        if (/login|account\.xiaomi\.com/i.test(location.href) || (!phMatch && !uidMatch && !h.draft.config.userName)) {
           throw new Error("检测到您尚未登录小米开放平台，请先登录开发者账号后再获取密钥。");
         }
-        if (!h.draft.config.email) {
+        if (!h.draft.config.userName) {
           try {
             if (phMatch && uidMatch) {
               const url = `/pltapi/uiue/user?edit=1&mideveloper_ph=${encodeURIComponent(phMatch[1])}&userId=${encodeURIComponent(uidMatch[1])}`;
               const r = await fetch(url, { credentials: "include" });
               if (r.ok) {
                 const d = await r.json();
-                if (d && d.data && d.data.email) h.draft.config.email = d.data.email;
+                if (d && d.data && d.data.email) h.draft.config.userName = d.data.email;
               }
             }
           } catch { /* ignore */ }
         }
-        if (!h.draft.config.email) {
+        if (!h.draft.config.userName) {
           throw new Error("未能自动获取到开发者邮箱，请确认已登录小米开放平台。");
         }
 
@@ -260,10 +286,12 @@ const APKGO_RECIPES = [
           throw new Error(`未能自动提取到私钥。请在页面上点击绿框高亮的「${btnName}」，然后再点「一键获取密钥」。`);
         }
 
-        h.draft.config.private_key = key;
-        return `已自动获取邮箱（${h.draft.config.email}）与私钥！正在保存并验证…`;
+        h.draft.config.privateKey = key;
+        return `已自动获取邮箱（${h.draft.config.userName}）与私钥！正在保存并验证…`;
       },
     },
+    // 配置平台的小米凭证还要公钥；公钥全局固定，直接带上。
+    finalize(config) { return { userName: config.userName, privateKey: config.privateKey, publicKey: XIAOMI_PUBLIC_KEY }; },
   },
   {
     id: "oppo", verified: true, cn: "OPPO", product: "OPPO 开放平台",
@@ -272,7 +300,7 @@ const APKGO_RECIPES = [
     noManual: true,
     hideWizardFields: true,
     progressOrder: ["goto", "filling", "saving", "done"],
-    progressLabels: { filling: "自动获取 Client ID 与 Secret", saving: "保存到 apkgo 并验证" },
+    progressLabels: { filling: "自动获取 Client ID 与 Secret", saving: "保存到配置平台并验证" },
     wizardHint: "助手会直接通过官方接口获取或创建服务端应用，提取 Client ID 和 Secret，并自动保存与验证。",
     doneBtnText: "重新获取并保存",
     doneHint: "已自动保存并验证 OPPO 开放平台凭据。",
@@ -283,11 +311,11 @@ const APKGO_RECIPES = [
     steps: [
       { t: "登录 OPPO 开放平台", d: "用主账号或管理员账号。" },
       { t: "进入「生态应用」管理页", d: "https://open.oppomobile.com/new/ecological/app" },
-      { t: "一键获取服务端应用密钥", d: "直接通过后台接口获取 Client ID 和 Secret，并保存到 apkgo 验证。" },
+      { t: "一键获取服务端应用密钥", d: "直接通过后台接口获取 Client ID 和 Secret，并保存到配置平台验证。" },
     ],
     fields: [
-      { key: "client_id", label: "Client ID", kind: "text", hints: [/client[\s_-]*id/i, /客户端\s*ID/i], pattern: /^\d{4,}$/, required: true },
-      { key: "client_secret", label: "Client Secret", kind: "secret", hints: [/client[\s_-]*secret/i, /密钥|secret/i], pattern: /^[A-Za-z0-9]{16,}$/, required: true },
+      { key: "clientId", label: "Client ID", kind: "text", hints: [/client[\s_-]*id/i, /客户端\s*ID/i], pattern: /^\d{4,}$/, required: true },
+      { key: "clientSecret", label: "Client Secret", kind: "secret", hints: [/client[\s_-]*secret/i, /密钥|secret/i], pattern: /^[A-Za-z0-9]{16,}$/, required: true },
     ],
     detect: async () => {
       const out = {};
@@ -303,8 +331,8 @@ const APKGO_RECIPES = [
           if (d && d.errno === 0 && d.data && Array.isArray(d.data.rows) && d.data.rows.length) {
             const target = d.data.rows.find((r) => /^apkgo/i.test(r.client_name)) || d.data.rows[0];
             if (target && target.client_id && target.client_secret) {
-              out.client_id = String(target.client_id);
-              out.client_secret = String(target.client_secret);
+              out.clientId = String(target.client_id);
+              out.clientSecret = String(target.client_secret);
               return out;
             }
           }
@@ -373,8 +401,8 @@ const APKGO_RECIPES = [
         if (serverApps && serverApps.length > 0) {
           const target = serverApps.find((r) => /^apkgo/i.test(r.client_name)) || serverApps[0];
           if (target && target.client_id && target.client_secret) {
-            h.draft.config.client_id = String(target.client_id);
-            h.draft.config.client_secret = String(target.client_secret);
+            h.draft.config.clientId = String(target.client_id);
+            h.draft.config.clientSecret = String(target.client_secret);
             return `已获取服务端应用「${target.client_name}」凭据！正在保存并验证…`;
           }
         }
@@ -388,8 +416,8 @@ const APKGO_RECIPES = [
             serverApps = await listServerApps();
             const target = (serverApps && serverApps.find((r) => r.client_name === appName)) || (serverApps && serverApps[0]);
             if (target && target.client_id && target.client_secret) {
-              h.draft.config.client_id = String(target.client_id);
-              h.draft.config.client_secret = String(target.client_secret);
+              h.draft.config.clientId = String(target.client_id);
+              h.draft.config.clientSecret = String(target.client_secret);
               return `已自动创建应用「${target.client_name}」并获取凭据！正在保存并验证…`;
             }
           }
@@ -401,8 +429,8 @@ const APKGO_RECIPES = [
           const idMatch = text.match(/\b(\d{6,22})\b/);
           const secretMatch = text.match(/\b([a-fA-F0-9]{32,64})\b/);
           if (idMatch && secretMatch) {
-            h.draft.config.client_id = idMatch[1];
-            h.draft.config.client_secret = secretMatch[1];
+            h.draft.config.clientId = idMatch[1];
+            h.draft.config.clientSecret = secretMatch[1];
             return `已获取凭据！正在保存并验证…`;
           }
         }
@@ -418,7 +446,7 @@ const APKGO_RECIPES = [
     noManual: true,
     hideWizardFields: true,
     progressOrder: ["goto", "filling", "saving", "done"],
-    progressLabels: { filling: "自动获取 Access Key 与 Secret", saving: "保存到 apkgo 并验证" },
+    progressLabels: { filling: "自动获取 Access Key 与 Secret", saving: "保存到配置平台并验证" },
     wizardHint: "助手会自动通过官方接口获取 Access Key 和 Access Secret，并自动保存与验证。",
     doneBtnText: "重新获取并保存",
     doneHint: "已自动保存并验证 vivo 开放平台凭据。",
@@ -429,11 +457,11 @@ const APKGO_RECIPES = [
     steps: [
       { t: "登录 vivo 开放平台", d: "用主账号操作。" },
       { t: "进入 API 管理页面", d: "https://dev.vivo.com.cn/apiAccess/detail" },
-      { t: "一键获取并保存凭据", d: "自动获取 Access Key 和 Access Secret 并保存到 apkgo 验证。" },
+      { t: "一键获取并保存凭据", d: "自动获取 Access Key 和 Access Secret 并保存到配置平台验证。" },
     ],
     fields: [
-      { key: "access_key", label: "Access Key", kind: "text", hints: [/access[\s_-]*key/i], pattern: /^[A-Za-z0-9]{8,}$/, required: true },
-      { key: "access_secret", label: "Access Secret", kind: "secret", hints: [/access[\s_-]*secret/i, /secret|密钥/i], pattern: /^[A-Za-z0-9]{16,}$/, required: true },
+      { key: "accessKey", label: "Access Key", kind: "text", hints: [/access[\s_-]*key/i], pattern: /^[A-Za-z0-9]{8,}$/, required: true },
+      { key: "accessSecret", label: "Access Secret", kind: "secret", hints: [/access[\s_-]*secret/i, /secret|密钥/i], pattern: /^[A-Za-z0-9]{16,}$/, required: true },
     ],
     detect: async () => {
       const out = {};
@@ -455,8 +483,8 @@ const APKGO_RECIPES = [
         if (res.ok) {
           const d = await res.json();
           if (d && d.code === 0 && d.data && d.data.accessKey && d.data.accessSecret) {
-            out.access_key = String(d.data.accessKey);
-            out.access_secret = String(d.data.accessSecret);
+            out.accessKey = String(d.data.accessKey);
+            out.accessSecret = String(d.data.accessSecret);
             return out;
           }
         }
@@ -514,8 +542,8 @@ const APKGO_RECIPES = [
 
         const detail = await fetchDetail();
         if (detail && detail.accessKey && detail.accessSecret) {
-          h.draft.config.access_key = String(detail.accessKey);
-          h.draft.config.access_secret = String(detail.accessSecret);
+          h.draft.config.accessKey = String(detail.accessKey);
+          h.draft.config.accessSecret = String(detail.accessSecret);
           return `已成功获取 vivo API 凭据（Access Key: ${detail.accessKey}）！正在保存并验证…`;
         }
 
@@ -525,8 +553,8 @@ const APKGO_RECIPES = [
           const keyMatch = text.match(/20\d{6}[A-Za-z0-9]{6,20}/) || text.match(/\b([A-Za-z0-9]{12,24})\b/);
           const secMatch = text.match(/\b([a-fA-F0-9]{32})\b/);
           if (keyMatch && secMatch && keyMatch[1] !== secMatch[1]) {
-            h.draft.config.access_key = keyMatch[1] || keyMatch[0];
-            h.draft.config.access_secret = secMatch[1] || secMatch[0];
+            h.draft.config.accessKey = keyMatch[1] || keyMatch[0];
+            h.draft.config.accessSecret = secMatch[1] || secMatch[0];
             return `已获取凭据！正在保存并验证…`;
           }
         }
@@ -560,7 +588,7 @@ const APKGO_RECIPES = [
     noManual: true,
     hideWizardFields: true,
     progressOrder: ["goto", "filling", "saving", "done"],
-    progressLabels: { filling: "生成并获取 Client ID 与 Secret", saving: "保存到 apkgo 并验证" },
+    progressLabels: { filling: "生成并获取 Client ID 与 Secret", saving: "保存到配置平台并验证" },
     wizardHint: "助手会自动在凭据管理页面生成 API 客户端凭证（Client ID 与 Secret），并自动保存与验证。",
     doneBtnText: "重新获取并保存",
     doneHint: "已自动保存并验证荣耀开发者服务平台凭据。",
@@ -571,11 +599,11 @@ const APKGO_RECIPES = [
     steps: [
       { t: "登录荣耀开发者服务平台", d: "用管理员账号。" },
       { t: "进入凭据管理页面", d: "https://developer.honor.com/cn/manageCenter/certificate?cardRouteCode=E00069&~id=69" },
-      { t: "一键生成并获取凭证", d: "自动生成 API 凭证并提取 Client ID 和 Secret 保存到 apkgo 验证。" },
+      { t: "一键生成并获取凭证", d: "自动生成 API 凭证并提取 Client ID 和 Secret 保存到配置平台验证。" },
     ],
     fields: [
-      { key: "client_id", label: "Client ID", kind: "text", hints: [/client[\s_-]*id/i, /客户端\s*ID/i], pattern: /^[A-Za-z0-9]{6,}$/, required: true },
-      { key: "client_secret", label: "Client Secret", kind: "secret", hints: [/client[\s_-]*secret/i, /密钥|secret/i], pattern: /^[A-Za-z0-9]{16,}$/, required: true },
+      { key: "clientId", label: "Client ID", kind: "text", hints: [/client[\s_-]*id/i, /客户端\s*ID/i], pattern: /^[A-Za-z0-9]{6,}$/, required: true },
+      { key: "clientSecret", label: "Client Secret", kind: "secret", hints: [/client[\s_-]*secret/i, /密钥|secret/i], pattern: /^[A-Za-z0-9]{16,}$/, required: true },
     ],
     isLoggedIn: async (h) => {
       if (/login|cas\./i.test(location.href)) return false;
@@ -641,8 +669,8 @@ const APKGO_RECIPES = [
         if (csrf) {
           const auth = await genAuth(csrf);
           if (auth && auth.clientId && auth.clientSecret) {
-            h.draft.config.client_id = String(auth.clientId);
-            h.draft.config.client_secret = String(auth.clientSecret);
+            h.draft.config.clientId = String(auth.clientId);
+            h.draft.config.clientSecret = String(auth.clientSecret);
             return `已成功生成并获取荣耀 API 凭据（Client ID: ${auth.clientId}）！正在保存并验证…`;
           }
         }
@@ -653,8 +681,8 @@ const APKGO_RECIPES = [
           const idMatch = text.match(/\b([a-fA-F0-9]{32})\b/);
           const secMatch = text.match(/\b([A-Za-z0-9]{32})\b/);
           if (idMatch && secMatch && idMatch[1] !== secMatch[1]) {
-            h.draft.config.client_id = idMatch[1];
-            h.draft.config.client_secret = secMatch[1];
+            h.draft.config.clientId = idMatch[1];
+            h.draft.config.clientSecret = secMatch[1];
             return `已获取凭据！正在保存并验证…`;
           }
         }
@@ -664,41 +692,30 @@ const APKGO_RECIPES = [
     },
   },
   {
-    id: "tencent", verified: true, cn: "应用宝", product: "腾讯开放平台",
+    id: "qq", verified: true, cn: "应用宝", product: "腾讯开放平台",
     hostRe: /(^|\.)open\.qq\.com$/,
     // 「账号管理 → API发布接口」那一页：access_secret 就显示在这里（2026-09 截图核对）。
     console: "https://app.open.qq.com/p/developer/team_manage/apply_api",
-    prereq: ["API 发布接口要先「申请开通」并等审核，通过后这一页才会显示 access_secret", "每个要发布的应用还需要一个 App ID，在应用详情页能看到"],
+    prereq: ["API 发布接口要先「申请开通」并等审核，通过后这一页才会显示 access_secret"],
     steps: [
       { t: "登录腾讯开放平台（应用宝）", d: "" },
       { t: "账号管理 → API发布接口", d: "没开通就先点「申请开通」，审核通过后再回来。", action: "goto" },
-      { t: "读出 access_secret 和开发者 ID", d: "助手从本页读 access_secret，开发者 ID 从登录信息里取，应用列表从后台自己的返回里取。", action: "fetch-key" },
-      { t: "去应用列表页采集应用", d: "应用宝按包名区分 App ID；助手在列表页自动取全部，取不到才要你手填一行。", action: "fetch-apps" },
+      { t: "读出 access_secret 和开发者 ID，保存", d: "助手从本页读 access_secret，开发者 ID 从登录信息里取。", action: "fetch-key" },
     ],
-    progressOrder: ["goto", "filling", "apps", "saving", "done"],
-    progressLabels: { filling: "读取 access_secret 与开发者 ID", apps: "去应用列表页采集应用", saving: "保存到 apkgo 并验证" },
-    wizardHint: "第一步在本页取 access_secret 和开发者 ID；第二步你点一下跳到应用列表页，助手自动取所有应用的包名与 App ID，然后保存验证。",
+    progressOrder: ["goto", "filling", "saving", "done"],
+    progressLabels: { filling: "读取 access_secret 与开发者 ID", saving: "保存到配置平台" },
+    wizardHint: "在本页取 access_secret 和开发者 ID，然后直接保存到配置平台。应用宝暂不支持在线验证。",
     doneBtnText: "重新获取并保存",
-    doneHint: "已自动保存并验证应用宝凭据。",
+    doneHint: "已保存应用宝凭据。",
     fields: [
-      { key: "user_id", label: "User ID（开发者 ID）", kind: "text", hints: [/user[\s_-]*id/i, /开发者\s*ID|用户\s*ID/i], pattern: /^\d{4,}$/, required: true, auto: true },
-      { key: "access_secret", label: "Access Secret", kind: "secret", hints: [/access[\s_-]*secret/i, /secret|密钥/i], pattern: /^[A-Za-z0-9]{16,}$/, required: true, auto: true },
-      { key: "__tencent_pkg", label: "应用包名（自动取到应用列表时可留空）", kind: "text", placeholder: "com.example.app", virtual: true },
-      { key: "__tencent_appid", label: "该应用的 App ID（同上）", kind: "text", hints: [/app\s*id|应用\s*ID/i], pattern: /^\d{4,}$/, virtual: true },
+      { key: "userId", label: "User ID（开发者 ID）", kind: "text", hints: [/user[\s_-]*id/i, /开发者\s*ID|用户\s*ID/i], pattern: /^\d{4,}$/, required: true, auto: true },
+      { key: "accessSecret", label: "Access Secret", kind: "secret", hints: [/access[\s_-]*secret/i, /secret|密钥/i], pattern: /^[A-Za-z0-9]{16,}$/, required: true, auto: true },
     ],
-    validate(cfg) {
-      if (cfg.__tencent_map) return "";
-      const pkg = (cfg.__tencent_pkg || "").trim(), id = (cfg.__tencent_appid || "").trim();
-      if (pkg && id) return "";
-      return "还差应用信息：助手没能自动取到应用列表，请手动填一行「包名 → App ID」。";
-    },
-    flowPages: [/\/p\/app\/list/],
-    flow: ["fetch-key", "fetch-apps"],
+    flow: ["fetch-key"],
     actions: {
-      // 不写死接口地址：access_secret 直接从页面上读，开发者 ID 从页面自己发过的
+      // 不写死接口地址：access_secret 直接从页面上读，开发者 ID 从登录信息 / 页面自己发过的
       // JSON 返回里按字段名取（见 src/content/sniff-main.js）。后台改版了也不容易坏。
       "fetch-key": async (h) => {
-        const notes = [];
         // access_secret：首选调后台自己的接口。这一条是同源、只认 cookie、没有时间戳
         // 签名（和 p.open.qq.com 那组不同），所以扩展可以直接复用你的登录态。
         let secret = "";
@@ -742,6 +759,7 @@ const APKGO_RECIPES = [
           if (apply) { h.highlight(apply); throw new Error("这一页还没有 access_secret，多半是 API 发布接口还没开通。已高亮「申请开通」，审核通过后再回来点一次。"); }
           throw new Error("没在本页读到 access_secret。请确认停在「账号管理 → API发布接口」页，且接口已开通。");
         }
+        h.draft.config.accessSecret = secret;
 
         // 开发者 ID：优先读本地存储（应用宝登录后写在 $loginInfo 里，页面一加载就有），
         // 读不到再退回页面自己发过的 JSON 返回。
@@ -752,7 +770,7 @@ const APKGO_RECIPES = [
           uid = h.deepFind(item.json, ["userId", "user_id", "developerId", "uin"], digits);
           if (uid) break;
         }
-        let entries = uid ? [] : await h.responses();
+        const entries = uid ? [] : await h.responses();
         for (const e of entries) {
           uid = h.deepFind(e.json, ["userId", "user_id", "developerId", "uin"], digits);
           if (uid) break;
@@ -764,134 +782,11 @@ const APKGO_RECIPES = [
         if (!uid) {
           const keys = new Set();
           for (const e of entries) { const walk = (o, d) => { if (!o || typeof o !== "object" || d > 3) return; for (const [k, v] of Object.entries(o)) { keys.add(k); walk(v, d + 1); } }; walk(e.json, 0); }
-          notes.push("没从后台返回里取到开发者 ID，请在下面手动填" + (keys.size ? "（看到的字段：" + [...keys].slice(0, 25).join("、") + "）" : "（这一页没抓到后台返回）"));
+          throw new Error("已读到 access_secret，但没从登录信息或后台返回里取到开发者 ID。请在下面的手动模式里填 User ID，再点「保存到配置平台并验证」" + (keys.size ? "（看到的字段：" + [...keys].slice(0, 25).join("、") + "）" : "") + "。");
         }
-
-        h.draft.config.access_secret = secret;
-        if (uid) h.draft.config.user_id = uid;
-
-        return (uid ? "已读到 access_secret 和开发者 ID。" : "已读到 access_secret。") + (notes.length ? notes.join("；") + "。" : "");
-      },
-
-      // 应用列表（包名 → App ID）：腾讯这条接口要页面 JS 现算、跟时间戳绑定的签名
-      // （实测重放返回 -9），所以不由助手构造请求，而是请用户点一下跳到应用列表页，
-      // 让页面自己去拉，我们从它的返回里按「形状」认：数组里的元素同时有包名样子的
-      // 串和数字 App ID。这样腾讯改字段名也不影响。
-      "fetch-apps": async (h) => {
-        if (h.draft.config.__tencent_map) return "应用列表已就绪。";
-        const pickApps = (list) => {
-          const out = {};
-          const scan = (o, depth) => {
-            if (!o || typeof o !== "object" || depth > 6) return;
-            if (Array.isArray(o)) {
-              for (const it of o) {
-                if (it && typeof it === "object") {
-                  let pkg = "", id = "";
-                  for (const [k, v] of Object.entries(it)) {
-                    const s = String(v == null ? "" : v);
-                    if (!pkg && /pkg|package|bundle/i.test(k) && /^[a-zA-Z][\w]*(\.[\w]+){1,}$/.test(s)) pkg = s;
-                    if (!id && /app_?id/i.test(k) && /^\d{4,}$/.test(s)) id = s;
-                  }
-                  if (pkg && id) out[pkg] = id;
-                }
-                scan(it, depth + 1);
-              }
-              return;
-            }
-            for (const v of Object.values(o)) scan(v, depth + 1);
-          };
-          for (const e of list) scan(e.json, 0);
-          return out;
-        };
-
-        const onList = /\/p\/app\/list/.test(location.href);
-        if (!onList) {
-          h.requestNav("https://app.open.qq.com/p/app/list", "去应用列表页采集应用 →");
-          return "access_secret 和开发者 ID 已就绪。应用列表要在应用列表页才拉得到，点下面的按钮过去，落地后自动接着采集并保存。";
-        }
-        let apps = pickApps(await h.responses());
-        if (!Object.keys(apps).length) { await h.wait(2000); apps = pickApps(await h.responses()); }
-        if (Object.keys(apps).length) {
-          h.draft.config.__tencent_map = JSON.stringify(apps);
-          return `取到 ${Object.keys(apps).length} 个应用的包名与 App ID，正在保存并验证…`;
-        }
-        if (!h.draft.config.__tencent_pkg) throw new Error("在应用列表页没抓到应用列表。刷新一下这一页再点「一键获取密钥」；或者在下面手填一行「包名 → App ID」。");
-        return "没抓到应用列表，用你手填的那一行。";
+        h.draft.config.userId = uid;
+        return "已读到 access_secret 和开发者 ID，正在保存…";
       },
     },
-    // 应用宝的 app_id 按包名映射；把两个虚拟字段合成 apkgo 要的 app_id_map。
-    finalize(config, draft) {
-      const out = { user_id: config.user_id, access_secret: config.access_secret };
-      let map = {};
-      const raw = (draft && draft.__tencent_map) || config.__tencent_map;
-      if (raw) { try { map = JSON.parse(raw); } catch { map = {}; } }
-      const pkg = (config.__tencent_pkg || "").trim();
-      const id = (config.__tencent_appid || "").trim();
-      if (pkg && id) map[pkg] = id;               // 手填的那行优先生效
-      if (Object.keys(map).length) out.app_id_map = JSON.stringify(map);
-      return out;
-    },
-  },
-  {
-    id: "meizu", cn: "魅族", product: "魅族 Flyme 开放平台",
-    hostRe: /(^|\.)open\.flyme\.cn$/,
-    console: "https://open.flyme.cn/",
-    prereq: [],
-    steps: [
-      { t: "登录魅族开放平台", d: "" },
-      { t: "找到「客户端凭证」/ API 密钥页", d: "" },
-      { t: "在本面板采集 client_id 和 client_secret 并保存", d: "" },
-    ],
-    fields: [
-      { key: "client_id", label: "Client ID", kind: "text", hints: [/client[\s_-]*id/i, /客户端\s*ID/i], pattern: /^[A-Za-z0-9]{4,}$/, required: true },
-      { key: "client_secret", label: "Client Secret", kind: "secret", hints: [/client[\s_-]*secret/i, /密钥|secret/i], pattern: /^[A-Za-z0-9]{16,}$/, required: true },
-    ],
-  },
-  {
-    id: "samsung", cn: "Samsung", product: "Galaxy Store Seller Portal",
-    hostRe: /(^|\.)seller\.samsungapps\.com$/,
-    console: "https://seller.samsungapps.com/",
-    prereq: ["需要 Seller Portal 的 Assign 权限来创建 service account"],
-    steps: [
-      { t: "登录 Seller Portal", d: "" },
-      { t: "Assistance → API Service → Create Service Account", d: "下载私钥 PEM，只能下载一次。" },
-      { t: "记下 Service Account ID，以及应用的 Content ID", d: "" },
-      { t: "在本面板填好并保存", d: "" },
-    ],
-    fields: [
-      { key: "service_account_id", label: "Service Account ID", kind: "text", hints: [/service\s*account\s*id/i], required: true },
-      { key: "private_key", label: "私钥文件（PEM）", kind: "file-text", accept: ".pem,.key,.txt", required: true },
-      { key: "content_id", label: "Content ID", kind: "text", hints: [/content\s*id/i], pattern: /^\d{6,}$/, required: true },
-    ],
-  },
-  {
-    id: "appstore", cn: "App Store", product: "App Store Connect",
-    hostRe: /(^|\.)appstoreconnect\.apple\.com$/,
-    console: "https://appstoreconnect.apple.com/access/integrations/api",
-    prereq: ["需要 Account Holder 或 Admin 角色", ".p8 私钥只能下载一次，下载后妥善保存"],
-    steps: [
-      { t: "用户和访问 → 集成 → App Store Connect API", d: "选「团队密钥」。" },
-      { t: "生成 API 密钥，访问权限选 App Manager 或 Admin", d: "" },
-      { t: "记下 Issuer ID 和密钥 ID，下载 .p8 文件", d: "" },
-      { t: "在本面板填好并选中 .p8 文件，保存", d: "" },
-    ],
-    fields: [
-      { key: "issuer_id", label: "Issuer ID", kind: "text", hints: [/issuer\s*id/i], pattern: /^[0-9a-f-]{36}$/i, required: true },
-      { key: "key_id", label: "密钥 ID（Key ID）", kind: "text", hints: [/key\s*id|密钥\s*ID/i], pattern: /^[A-Z0-9]{10}$/, required: true },
-      { key: "private_key", label: "私钥文件（.p8）", kind: "file-text", accept: ".p8,.pem", required: true },
-    ],
-  },
-  {
-    id: "googleplay", cn: "Google Play", product: "Google Play Console",
-    hostRe: /(^|\.)play\.google\.com$/,
-    console: "https://play.google.com/console/",
-    prereq: ["要先在 Google Cloud 创建服务账号并下载 JSON，再回 Play Console 邀请它", "这一家暂时请在 apkgo 添加页手动上传 JSON"],
-    steps: [
-      { t: "Play Console → 设置 → API 访问权限", d: "关联一个 Google Cloud 项目。" },
-      { t: "在 Google Cloud 创建服务账号并生成 JSON 密钥", d: "" },
-      { t: "回到 Play Console 邀请该服务账号，授予发布权限", d: "" },
-      { t: "在 apkgo 添加页上传这个 JSON", d: "" },
-    ],
-    fields: [],
   },
 ];
