@@ -1,12 +1,13 @@
-// 把扩展的经典脚本（非 module）装进一个 vm 上下文里跑单测。
-// 顶层 const 不会挂到 global 上，所以用 get(表达式) 取值。
+// 把扩展的经典脚本（非 module）拼成一个函数体，在宿主 realm 里编译执行。
+// 用宿主 realm（而不是 vm.createContext 的独立 realm）是为了让脚本造出来的对象/数组
+// 带的是宿主的 Object/Array 原型——否则 assert/strict 的深比较会连原型一起比，
+// 结构完全相同也判不等。顶层 const 不会挂到 global 上，所以用 get(表达式) 取值。
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 
 export const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 
-// 内存版 chrome.storage.local / session。data 直接暴露，方便断言。
 export function fakeStorageArea() {
   const data = {};
   return {
@@ -24,7 +25,6 @@ export function fakeStorageArea() {
   };
 }
 
-// 假 chrome：只实现扩展脚本加载与被测路径用到的部分。listeners 记录 addListener 注册的回调。
 export function fakeChrome() {
   const listeners = {};
   const on = (name) => ({ addListener(fn) { (listeners[name] ||= []).push(fn); } });
@@ -44,12 +44,20 @@ export function fakeChrome() {
   };
 }
 
-// files：相对仓库根的脚本路径，按顺序执行；globals：注入上下文的全局对象（chrome、fetch…）。
+// files：相对仓库根的脚本路径，按顺序拼接；globals：作为函数参数注入（chrome、fetch…）。
 export function loadScripts(files, globals = {}) {
-  const ctx = vm.createContext({ console, URL, URLSearchParams, setTimeout, clearTimeout, ...globals });
-  const run = (f) => vm.runInContext(fs.readFileSync(path.join(ROOT, f), "utf8"), ctx, { filename: f });
-  // background.js 用 importScripts 引其他脚本，这里让它在同一个上下文里执行。
-  ctx.importScripts = (...names) => names.forEach((n) => run("src/" + n));
-  for (const f of files) run(f);
-  return { ctx, get: (expr) => vm.runInContext(expr, ctx) };
+  const seen = new Set();
+  // background.js 用 importScripts 引其他脚本，这里把它们的源码就地内联到同一个作用域。
+  const expand = (f) => {
+    if (seen.has(f)) return "";
+    seen.add(f);
+    return fs.readFileSync(path.join(ROOT, f), "utf8").replace(
+      /^[ \t]*importScripts\(([^)]*)\);?[ \t]*$/m,
+      (_, args) => args.split(",").map((s) => expand("src/" + s.trim().replace(/^["']|["']$/g, ""))).join("\n"),
+    );
+  };
+  const names = Object.keys(globals);
+  const body = files.map(expand).join("\n;\n") + "\n;return (expr) => eval(expr);";
+  const get = vm.compileFunction(body, names, { filename: files.join("+") })(...names.map((n) => globals[n]));
+  return { get };
 }
