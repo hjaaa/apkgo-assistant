@@ -4,24 +4,19 @@
 
 const APKGO = {
   VERSION: chrome.runtime.getManifest().version,
-  DEFAULT_ORIGIN: "https://apkgo.baici.tech",
-  // storage.local：配对信息（含密钥）。密钥权限只有 credential:create。
+  // 配置平台地址。bridge 只注入在 manifest 列出的地址上，配对时以页面 origin 为准。
+  DEFAULT_ORIGIN: "http://192.168.1.18:16003",
+  // storage.local：配对信息（平台 origin、用户 token、用户名）。
   KEY_PAIRED: "paired",
-  // storage.session：采集草稿（按商店）和「刚从 apkgo 跳过来要打开面板」的标记。
-  // 关浏览器即清，密钥明文从不落盘。
+  // storage.session：采集草稿（按商店）、「刚从配置平台跳过来要打开面板」的标记、
+  // 从配置平台带过来的主体（按商店）。关浏览器即清，密钥明文从不落盘。
   KEY_DRAFT: (storeId) => `draft:${storeId}`,
   KEY_PENDING: "pendingStore",
-  // 一句话的中文提示：把 apkgo 返回的验证错误映射成「下一步该做什么」。
-  errorHint(message) {
-    const m = String(message || "");
-    if (/no app found for package/i.test(m)) return "这个开发者账号下没有对应包名的应用。确认用的是上架该应用的账号；或者先在后台创建应用，再采集。";
-    if (/intro .*is empty|应用简介/i.test(m)) return "荣耀要求应用简介不能为空，先在后台把简介填上。";
-    if (/token|access_token|invalid_client|401|签名|signature|secret/i.test(m)) return "密钥对不上：回到后台核对是否完整复制，或者密钥是否刚被重置过。";
-    if (/配额|上限|quota|limit/i.test(m)) return "商店账号数量已到套餐上限，在 apkgo 升级套餐或删掉不用的账号。";
-    if (/另一个组织|原组织/.test(m)) return "这个商店账号已经绑在另一个组织下了。一个商店账号只能属于一个组织：要么去那个组织里删掉，要么换一个账号。";
-    if (/已存在|已被使用|鉴权信息|duplicate|conflict/i.test(m)) return "这组密钥已经在 apkgo 里了（多半是刚才那次已经自动保存成功），不用重复添加；去 apkgo「商店账号」里能看到。";
-    if (/permission|权限/i.test(m)) return "连接用的密钥权限不对，回到 apkgo 添加页重新连接一次。";
-    return "";
+  KEY_OWNER: (storeId) => `owner:${storeId}`,
+  // 配置平台「主体」页；带 owner 时直接弹出该主体的密钥配置弹窗（路由已支持 ?owner=&openSecret=1）。
+  platformSecretPage(owner, origin) {
+    const base = `${origin || APKGO.DEFAULT_ORIGIN}/#/application/mainMap`;
+    return owner ? `${base}?owner=${encodeURIComponent(owner)}&openSecret=1` : base;
   },
   maskSecret(v) {
     const s = String(v || "");
@@ -33,23 +28,13 @@ const APKGO = {
     try { host = new URL(url).hostname; } catch { return null; }
     return APKGO_RECIPES.find((r) => r.hostRe.test(host)) || null;
   },
+  // 网页发过来的就是渠道值（huawei / xiaomi / oppo / vivo / honor / qq）。
   recipeById(id) {
     if (!id) return null;
     const key = String(id).toLowerCase().trim();
-    const alias = {
-      harmony: "huawei",
-      harmonyos: "huawei",
-      hongmeng: "huawei",
-      google: "googleplay",
-      google_play: "googleplay",
-      play: "googleplay",
-      apple: "appstore",
-      ios: "appstore",
-    };
-    const targetId = alias[key] || key;
-    return APKGO_RECIPES.find((r) => r.id === targetId) || null;
+    return APKGO_RECIPES.find((r) => r.id === key) || null;
   },
-  // 把 File 读成 base64（不带 data: 前缀），和网页添加页的 readFileAsBase64 一致。
+  // 把 File 读成 base64（不带 data: 前缀）。
   fileToBase64(file) {
     return new Promise((resolve, reject) => {
       const fr = new FileReader();
