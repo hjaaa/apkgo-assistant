@@ -8,19 +8,14 @@
   async function renderConn() {
     const st = await APKGO.send({ type: "state" });
     if (!st.ok || !st.paired) {
-      conn.innerHTML = `<div>还没连接 apkgo。</div><div class="row"><a class="btn acc" href="${APKGO.DEFAULT_ORIGIN}/credentials/new" target="_blank" rel="noopener">打开 apkgo 添加页去连接</a></div>`;
+      conn.innerHTML = `<div>还没连接配置平台。</div><div class="row"><a class="btn acc" href="${esc(APKGO.platformSecretPage(""))}" target="_blank" rel="noopener">打开配置平台去连接</a></div>
+        <div class="note">在「主体」页打开某个主体的密钥配置弹窗，点「连接助手」。</div>`;
       return;
     }
     const p = st.paired;
-    conn.innerHTML = `<div class="n">已连接 · ${esc(p.orgName)}</div><div class="o">${esc(p.origin)}</div>
-      <div class="row">${st.hostGranted ? "" : `<button class="btn warn" id="grant">允许访问 ${esc(p.origin)}</button>`}<button class="btn ghost" id="unpair">断开连接</button></div>
-      ${st.hostGranted ? "" : '<div class="err">这个地址不在默认列表里，需要你点一次允许，助手才能把密钥发过去。</div>'}`;
+    conn.innerHTML = `<div class="n">已连接 · ${esc(p.userName || "配置平台")}</div><div class="o">${esc(p.origin)}</div>
+      <div class="row"><button class="btn ghost" id="unpair">断开连接</button></div>`;
     document.getElementById("unpair").onclick = async () => { await APKGO.send({ type: "unpair" }); renderConn(); };
-    const g = document.getElementById("grant");
-    if (g) g.onclick = async () => {
-      try { await chrome.permissions.request({ origins: [p.origin + "/*"] }); } catch { /* 用户拒绝 */ }
-      renderConn();
-    };
   }
 
   async function renderHere() {
@@ -38,7 +33,7 @@
   function renderStores() {
     const list = APKGO_RECIPES.filter((r) => r.verified);
     stores.innerHTML = list.map((r) => `<button class="chip" data-id="${r.id}">${esc(r.cn)}</button>`).join("")
-      + `<div class="note">其余商店（魅族、Samsung、App Store、Google Play）暂未适配，请在 <a href="${APKGO.DEFAULT_ORIGIN}/credentials/new" target="_blank" rel="noopener">apkgo 添加页</a>手动添加。</div>`;
+      + '<div class="note">从这里打开的后台没有主体上下文，只能看步骤；要保存请从配置平台的密钥配置弹窗点「助手采集」过去。</div>';
     stores.onclick = async (e) => {
       const b = e.target.closest("[data-id]");
       if (!b) return;

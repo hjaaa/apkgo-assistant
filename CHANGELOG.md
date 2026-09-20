@@ -1,8 +1,13 @@
 # 更新记录
 
-## 未发布
+## 0.6.0 · 2026-09-20
 
-- 改为自建托管：不上 Chrome / Edge 商店，zip 放七牛 CDN，下载地址 https://apkgo.baici.tech/dl/apkgo-assistant.zip ，控制台的安装卡片直接给下载按钮和四步加载说明。
+- **后端切换**：保存目标从 apkgo cloud 换成配置平台（dream-product 的主体开放平台配置）。在平台「密钥配置」弹窗点「连接助手」把登录令牌交给扩展；每个渠道行「助手采集」带着主体打开后台；保存按 (主体, 渠道) 有则改、无则增，后端在线验活通过才落库。
+- 新增 `src/platform.js`：唯一的平台客户端，Bearer 请求、424 刷新重试、401 清配对。
+- 配方字段 key 改为配置平台各渠道 Config 类的属性名（驼峰）。华为把下载的 JSON 拆成 keyId / privateKey / subAccount / projectId；小米内置公钥；应用宝改为单段（只取 userId 与 accessSecret）。
+- 删除未验证的魅族 / Samsung / App Store / Google Play 配方；删除备注名、关联应用、可选域名授权。
+- 扩展改名「密钥助手」，文案里的 apkgo 全部换成「配置平台」。
+- 新增 `npm test`（Node 内置 test runner）单测；e2e 改为伪配置平台。
 
 ## 0.5.0 · 2026-09-15
 
