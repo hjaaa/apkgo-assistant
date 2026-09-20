@@ -1,5 +1,5 @@
-// 真实端到端：真正的扩展 + 真 Chromium + 伪 apkgo 服务 + 拦截出来的伪 OPPO 后台页。
-// 用法：npm run e2e（run.mjs 会先起伪 apkgo 服务）。需要 playwright 的 Chromium：npx playwright install chromium
+// 真实端到端：真正的扩展 + 真 Chromium + 伪配置平台 + 拦截出来的伪商店后台页。
+// 用法：npm run e2e（run.mjs 会先起伪平台）。需要 playwright 的 Chromium：npx playwright install chromium
 import fs from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright";
@@ -7,8 +7,11 @@ import { chromium } from "playwright";
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const EXT = path.resolve(HERE, "../..");
 const ORIGIN = "http://localhost:9090";
-const KEY = "apkgo_" + "ab".repeat(24);
-const OPPO_HTML = fs.readFileSync(path.join(HERE, "fixtures/oppo.html"), "utf8");
+const OWNER = "安徽逐梦星河网络科技有限公司";
+const SHOTS = path.join(HERE, "../../dist/shots");
+const fixture = (n) => fs.readFileSync(path.join(HERE, "fixtures", n), "utf8");
+const received = async () => (await fetch(`${ORIGIN}/__received`)).json();
+const html = (body) => ({ contentType: "text/html; charset=utf-8", body });
 
 const userData = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "apkgo-e2e-"));
 const ctx = await chromium.launchPersistentContext(userData, {
@@ -16,198 +19,190 @@ const ctx = await chromium.launchPersistentContext(userData, {
   args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`],
 });
 const out = { steps: [] };
-const step = (name, data) => { out.steps.push({ name, ...data }); console.log("•", name, JSON.stringify(data)); };
-try {
-  let sw = ctx.serviceWorkers()[0]; if (!sw) sw = await ctx.waitForEvent("serviceworker", { timeout: 15000 });
-  step("service worker up", { url: sw.url() });
+const step = (name, data) => { out.steps.push({ ...data, name }); console.log("•", name, JSON.stringify(data)); };
+const must = (cond, msg) => { if (!cond) throw new Error(msg); };
 
-  // 1. 网页侧协议：hello → ready；pair → paired
-  const page = await ctx.newPage();
-  await page.goto(`${ORIGIN}/credentials/new?store=oppo`);
-  await page.waitForFunction(() => window.__state.ready, null, { timeout: 10000 });
-  step("ready", await page.evaluate(() => window.__state.ready));
-  await page.evaluate((k) => window.__pair(k), KEY);
-  await page.waitForFunction(() => window.__state.paired || window.__state.error, null, { timeout: 10000 });
-  step("paired", await page.evaluate(() => ({ paired: window.__state.paired, error: window.__state.error })));
-
-  // 2. open-console → 后台开新标签到 OPPO（被拦截成伪页面），面板应自动打开
-  await ctx.route("https://open.oppomobile.com/**", (route) => route.fulfill({ contentType: "text/html; charset=utf-8", body: OPPO_HTML }));
-  // 扩展自己 tabs.create 出来的页会抢在 Playwright 路由之前发请求（加载到真站），
-  // 所以只用它验证「open-console 真的开了 OPPO 标签」，然后关掉，改由 Playwright 开页。
-  const [autoTab] = await Promise.all([ctx.waitForEvent("page", { timeout: 10000 }), page.evaluate(() => window.__open("oppo"))]);
-  await autoTab.waitForLoadState("domcontentloaded").catch(() => {});
-  step("open-console opened tab", { url: autoTab.url() });
-  await autoTab.close();
-  const oppo = await ctx.newPage();
-  await oppo.goto("https://open.oppomobile.com/new/ecological/app");
-  await oppo.waitForSelector("#apkgo-assistant-root", { state: "attached", timeout: 10000 });
-  await oppo.waitForTimeout(2600); // 让启动按钮的滑入动画结束
-  await oppo.screenshot({ path: path.join(HERE, "../../dist/shots/00-launcher.png") });
-
-  // 关闭的 shadow root：走 CDP 穿透
-  const cdp = await ctx.newCDPSession(oppo);
+// 面板在关闭的 shadow root 里：走 CDP 穿透。返回一个「在 shadow root 上执行函数」的助手。
+async function shadow(page) {
+  const cdp = await ctx.newCDPSession(page);
   await cdp.send("DOM.enable"); await cdp.send("Runtime.enable");
-  async function shadowObject() {
+  return async (fnSrc, ...args) => {
     const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
     const { nodeId: hostId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector: "#apkgo-assistant-root" });
     const { node } = await cdp.send("DOM.describeNode", { nodeId: hostId, pierce: true });
     const { object } = await cdp.send("DOM.resolveNode", { backendNodeId: node.shadowRoots[0].backendNodeId });
-    return object.objectId;
-  }
-  async function inShadow(fnSrc, ...args) {
-    const objectId = await shadowObject();
-    const r = await cdp.send("Runtime.callFunctionOn", { objectId, functionDeclaration: `function(...a){ return (${fnSrc})(this, ...a); }`, arguments: args.map((v) => ({ value: v })), returnByValue: true, awaitPromise: true });
+    const r = await cdp.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: `function(...a){ return (${fnSrc})(this, ...a); }`, arguments: args.map((v) => ({ value: v })), returnByValue: true, awaitPromise: true });
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.text + " " + JSON.stringify(r.exceptionDetails.exception));
     return r.result.value;
-  }
-  // pendingStore 可能已让面板自动打开（点击会把它关上），所以只在关着时点。
-  await inShadow(`(sr) => { if (!sr.querySelector('.panel').classList.contains('open')) sr.querySelector('.launch').click(); }`);
-  await oppo.waitForTimeout(500);
-  const opened = await inShadow(`(sr) => sr.querySelector('.panel').className`);
-  step("panel open", { className: opened });
-  await oppo.screenshot({ path: path.join(HERE, "../../dist/shots/01-panel.png") });
+  };
+}
+const openPanel = (sh) => sh(`(sr) => { if (!sr.querySelector('.panel').classList.contains('open')) sr.querySelector('.launch').click(); }`);
+const panelText = (sh) => sh(`(sr) => sr.querySelector('.panel .body').innerText`);
+const msgText = (sh) => sh(`(sr) => (sr.querySelector('.msg')||{}).textContent || ''`);
+const oneClick = (sh) => sh(`(sr) => { const b = sr.querySelector('[data-oneclick]'); if (!b || b.disabled) return false; b.click(); return true; }`);
+const oneClickDisabled = (sh) => sh(`(sr) => { const b = sr.querySelector('[data-oneclick]'); return !b || b.disabled; }`);
 
-  // 3. OPPO 一键获取：自动抓取 Client ID 与 Secret → 自动保存验证
-  step("oppo one-click present", { btn: await inShadow(`(sr) => !!sr.querySelector('[data-oneclick]')`) });
-  await inShadow(`(sr) => sr.querySelector('[data-oneclick]').click()`);
+// 从伪平台页发 open-console（带主体）：扩展会自己开一个标签到真站（抢在 Playwright 路由之前），
+// 这里只用它验证「真的开了」，然后关掉，后台页改由 Playwright 打开（被路由成伪页面）。
+async function openFromPlatform(platform, store) {
+  const [autoTab] = await Promise.all([ctx.waitForEvent("page", { timeout: 10000 }), platform.evaluate(([s, o]) => window.__open(s, o), [store, OWNER])]);
+  await autoTab.waitForLoadState("domcontentloaded").catch(() => {});
+  const url = autoTab.url();
+  await autoTab.close();
+  await platform.waitForFunction((s) => window.__state.opened === s, store, { timeout: 5000 });
+  return url;
+}
+
+try {
+  let sw = ctx.serviceWorkers()[0]; if (!sw) sw = await ctx.waitForEvent("serviceworker", { timeout: 15000 });
+  step("service worker up", { url: sw.url() });
+
+  // 1. 配对：hello → ready；pair(token) → paired；回包不带 token
+  const platform = await ctx.newPage();
+  await platform.goto(`${ORIGIN}/#/application/mainMap`);
+  await platform.waitForFunction(() => window.__state.ready, null, { timeout: 10000 });
+  step("ready", await platform.evaluate(() => window.__state.ready));
+  await platform.evaluate(() => window.__pair("at-1", "rt-1"));
+  await platform.waitForFunction(() => window.__state.paired || window.__state.error, null, { timeout: 10000 });
+  const pairedState = await platform.evaluate(() => ({ paired: window.__state.paired, error: window.__state.error }));
+  step("paired", pairedState);
+  must(pairedState.paired && pairedState.paired.userName === "张三", "配对失败：" + pairedState.error);
+  must(!("accessToken" in pairedState.paired) && !("refreshToken" in pairedState.paired), "paired 回包不能带 token");
+
+  // 2. 没有主体上下文：面板出现但不能一键
+  await ctx.route("https://open.oppomobile.com/**", (route) => route.fulfill(html(fixture("oppo.html"))));
+  const oppo = await ctx.newPage();
+  await oppo.goto("https://open.oppomobile.com/new/ecological/app");
+  await oppo.waitForSelector("#apkgo-assistant-root", { state: "attached", timeout: 10000 });
+  await oppo.waitForTimeout(2600); // 让启动按钮的滑入动画结束
+  await oppo.screenshot({ path: path.join(SHOTS, "00-launcher.png") });
+  let sh = await shadow(oppo);
+  await openPanel(sh); await oppo.waitForTimeout(500);
+  const noOwner = { disabled: await oneClickDisabled(sh), text: await panelText(sh) };
+  step("no owner context", { disabled: noOwner.disabled, hint: /没有主体上下文/.test(noOwner.text) });
+  must(noOwner.disabled && /没有主体上下文/.test(noOwner.text), "没有主体时一键按钮应禁用并提示");
+  await oppo.screenshot({ path: path.join(SHOTS, "01-panel-no-owner.png") });
+
+  // 3. 从平台弹窗「助手采集」带主体打开 OPPO；已开的 OPPO 页刷新后面板知道主体
+  step("open-console opened tab", { url: await openFromPlatform(platform, "oppo") });
+  await oppo.reload();
+  await oppo.waitForSelector("#apkgo-assistant-root", { state: "attached", timeout: 10000 });
+  await oppo.waitForTimeout(800);
+  sh = await shadow(oppo);
+  await openPanel(sh); await oppo.waitForTimeout(500);
+  const withOwner = await panelText(sh);
+  step("owner context", { owner: withOwner.includes("将保存到主体：" + OWNER), connected: withOwner.includes("已连接配置平台 · 张三") });
+  must(withOwner.includes("将保存到主体：" + OWNER), "面板没显示主体");
+  await oppo.screenshot({ path: path.join(SHOTS, "01-panel.png") });
+
+  // 4. OPPO 一键：抓 Client ID / Secret → add
+  must(await oneClick(sh), "一键按钮不可点");
   await oppo.waitForTimeout(2500);
-  step("oppo saved", await inShadow(`(sr) => ({ msg: (sr.querySelector('.msg')||{}).textContent, prog: (sr.querySelector('.prog')||{}).textContent })`));
-  await oppo.screenshot({ path: path.join(HERE, "../../dist/shots/03-saved.png") });
+  let msg = await msgText(sh);
+  let recv = await received();
+  step("oppo saved (add)", { msg, mode: recv[0] && recv[0].mode, body: recv[0] && recv[0].body });
+  must(/在线验证通过/.test(msg), "OPPO 保存后应提示验证通过：" + msg);
+  must(recv.length === 1 && recv[0].mode === "add", "第一次保存应走 add");
+  must(recv[0].body.owner === OWNER && recv[0].body.channel === "oppo", "owner / channel 不对");
+  must(recv[0].body.configInfo.clientId === "1855486693700881086" && recv[0].body.configInfo.clientSecret.length === 64, "configInfo 字段不对");
+  must(!("store_name" in recv[0].body) && !("label" in recv[0].body), "不应再有 apkgo 的字段");
+  await oppo.screenshot({ path: path.join(SHOTS, "03-saved.png") });
 
-  // 6. 服务端真的收到了什么
-  const received = await (await fetch(`${ORIGIN}/__received`)).json();
-  step("server received", { count: received.length, first: received[0] });
+  // 5. 再存一次 → edit 带 id
+  must(await oneClick(sh), "「重新获取并保存」不可点");
+  await oppo.waitForTimeout(2500);
+  recv = await received();
+  step("oppo saved again (edit)", { mode: recv[1] && recv[1].mode, id: recv[1] && recv[1].body.id });
+  must(recv.length === 2 && recv[1].mode === "edit" && recv[1].body.id === 1, "第二次保存应走 edit 带 id");
 
-  // 7. 华为半自动：「帮我点」打开并填好创建弹窗 → 用户点「确认」→ 下载的 JSON 自动进面板 → 保存
-  const AGC_OUTER = fs.readFileSync(path.join(HERE, "fixtures/agc-outer.html"), "utf8");
-  const AGC_INNER = fs.readFileSync(path.join(HERE, "fixtures/agc-inner.html"), "utf8");
-  await ctx.route("https://developer.huawei.com/**", (route) => route.fulfill({ contentType: "text/html; charset=utf-8", body: route.request().url().includes("/cdp/") ? AGC_INNER : AGC_OUTER }));
+  // 6. 令牌过期：下一次请求 424 → 扩展刷新后用新 token 重试
+  await fetch(`${ORIGIN}/__expire-next`, { method: "POST" });
+  must(await oneClick(sh), "一键按钮不可点");
+  await oppo.waitForTimeout(2500);
+  recv = await received();
+  msg = await msgText(sh);
+  step("token refreshed", { msg, mode: recv[2] && recv[2].mode, auth: recv[2] && recv[2].auth });
+  must(recv.length === 3 && recv[2].mode === "edit" && recv[2].auth === "Bearer at-2", "过期后应刷新并用新 token 重试：" + JSON.stringify(recv[2]));
+  must(/在线验证通过/.test(msg), "刷新后应保存成功：" + msg);
+
+  // 7. 华为：「一键」打开并填好创建弹窗 → 用户点「确认」→ 下载的 JSON 自动进面板 → 拆成四个字段保存
+  await ctx.route("https://developer.huawei.com/**", (route) => route.fulfill(html(route.request().url().includes("/cdp/") ? fixture("agc-inner.html") : fixture("agc-outer.html"))));
+  step("open-console huawei", { url: await openFromPlatform(platform, "huawei") });
   const agc = await ctx.newPage();
   await agc.goto("https://developer.huawei.com/consumer/cn/service/josp/agc/index.html#/ups/9249519184595983326");
   await agc.waitForSelector("#apkgo-assistant-root", { state: "attached", timeout: 10000 });
   await agc.frameLocator("iframe").locator("text=Service Account是更安全的凭据").waitFor({ timeout: 10000 });
   await agc.waitForTimeout(600);
-  const cdp2 = await ctx.newCDPSession(agc);
-  await cdp2.send("DOM.enable"); await cdp2.send("Runtime.enable");
-  async function inShadow2(fnSrc, ...args) {
-    const { root } = await cdp2.send("DOM.getDocument", { depth: 0 });
-    const { nodeId: hostId } = await cdp2.send("DOM.querySelector", { nodeId: root.nodeId, selector: "#apkgo-assistant-root" });
-    const { node } = await cdp2.send("DOM.describeNode", { nodeId: hostId, pierce: true });
-    const { object } = await cdp2.send("DOM.resolveNode", { backendNodeId: node.shadowRoots[0].backendNodeId });
-    const r = await cdp2.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: `function(...a){ return (${fnSrc})(this, ...a); }`, arguments: args.map((v) => ({ value: v })), returnByValue: true, awaitPromise: true });
-    if (r.exceptionDetails) throw new Error(r.exceptionDetails.text + " " + JSON.stringify(r.exceptionDetails.exception));
-    return r.result.value;
-  }
-  await inShadow2(`(sr) => { if (!sr.querySelector('.panel').classList.contains('open')) sr.querySelector('.launch').click(); }`);
-  await agc.waitForTimeout(400);
-  step("huawei panel", { actions: await inShadow2(`(sr) => [...sr.querySelectorAll('[data-action]')].map((b) => b.dataset.action)`) });
-  step("huawei one-click present", { btn: await inShadow2(`(sr) => !!sr.querySelector('[data-oneclick]')`) });
-  await inShadow2(`(sr) => sr.querySelector('[data-oneclick]').click()`);
+  const sh2 = await shadow(agc);
+  await openPanel(sh2); await agc.waitForTimeout(400);
+  must(await oneClick(sh2), "华为一键按钮不可点");
   await agc.waitForTimeout(1200);
   const inner = agc.frameLocator("iframe");
   step("huawei open-create", {
-    msg: await inShadow2(`(sr) => (sr.querySelector('.msg')||{}).textContent`),
+    msg: await msgText(sh2),
     dialogVisible: await inner.locator(".el-dialog__wrapper.on").count(),
-    name: await inner.locator("input.el-input__inner").inputValue(),
+    appName: await inner.locator("input.el-input__inner").inputValue(),
     devChecked: await inner.locator('input[name=t][value=dev]').isChecked(),
     appAdminChecked: await inner.locator('.el-checkbox__original[value=app]').isChecked(),
-    okOutlined: await inner.locator(".el-dialog__footer button").first().evaluate((b) => b.style.outline),
   });
-  step("huawei panel gave way", { panel: await inShadow2(`(sr) => sr.querySelector('.panel').className`), notice: await inShadow2(`(sr) => sr.querySelector('.notice').className`) });
-  await agc.screenshot({ path: path.join(HERE, "../../dist/shots/05-huawei-filled.png") });
-  // 用户点「确认」→ 页面用 <a download> 下载 blob JSON → 钩子抓到 → 面板填好
-  step("huawei hook present", { top: await agc.evaluate(() => !!window.__apkgoDownloadHook), inner: await inner.locator("body").evaluate(() => !!window.__apkgoDownloadHook) });
-  const dl = agc.waitForEvent("download", { timeout: 5000 }).then((d) => ({ name: d.suggestedFilename() }), () => ({ name: null }));
+  await agc.screenshot({ path: path.join(SHOTS, "05-huawei-filled.png") });
+  const dl = agc.waitForEvent("download", { timeout: 5000 }).then((d) => ({ file: d.suggestedFilename() }), () => ({ file: null }));
   await inner.locator(".el-dialog__footer button").first().click();
   step("huawei browser download event", await dl);
-  await agc.waitForTimeout(1500);
-  step("huawei captured", await inShadow2(`(sr) => ({ file: (sr.querySelector('.file .name')||{}).textContent, msg: (sr.querySelector('.msg')||{}).textContent })`));
-  await agc.screenshot({ path: path.join(HERE, "../../dist/shots/06-huawei-captured.png") });
-  // 一键流程里保存是自动的：这里不点保存，只等结果
-  await agc.waitForTimeout(1500);
-  const received2 = await (await fetch(`${ORIGIN}/__received`)).json();
-  const last = received2[received2.length - 1];
-  const sa = last && last.body && last.body.config && last.body.config.service_account;
-  const decoded = sa ? JSON.parse(Buffer.from(sa, "base64").toString("utf8")) : null;
-  step("huawei saved", { msg: await inShadow2(`(sr) => (sr.querySelector('.msg')||{}).textContent`), store: last && last.body.store_name, jsonKeys: decoded && Object.keys(decoded), name: decoded && decoded.name, roles: decoded && decoded.roles });
-  if (!decoded || decoded.name !== "apkgo" || !decoded.roles.includes("app")) throw new Error("华为一键流程没有自动把下载的 JSON 保存到服务端");
+  await agc.waitForTimeout(3000); // 抓到下载 → 自动保存
+  recv = await received();
+  const hw = recv[recv.length - 1];
+  step("huawei saved", { msg: await msgText(sh2), mode: hw.mode, channel: hw.body.channel, keys: Object.keys(hw.body.configInfo) });
+  must(hw.body.channel === "huawei" && hw.mode === "add", "华为应新增保存");
+  must(hw.body.configInfo.keyId === "k1" && hw.body.configInfo.subAccount === "317654321" && /BEGIN PRIVATE KEY/.test(hw.body.configInfo.privateKey) && hw.body.configInfo.projectId === "", "华为 JSON 没有拆成四个字段：" + JSON.stringify(hw.body.configInfo));
+  await agc.screenshot({ path: path.join(SHOTS, "06-huawei-captured.png") });
 
-  // 7c. 应用宝：从页面读 access_secret + 从页面自己的 JSON 返回里取 userId
-  const TENCENT_HTML = fs.readFileSync(path.join(HERE, "fixtures/tencent.html"), "utf8");
-  // 真实腾讯会回跨域头，桩也要回，否则页面的 fetch 被 CORS 拒、记录器看不到返回
+  // 8. 应用宝：单段——本页读 access_secret + 登录信息取 userId → 直接保存（后端不验活）
   const CORS = { "access-control-allow-origin": "https://app.open.qq.com", "access-control-allow-credentials": "true", "access-control-allow-headers": "*", "access-control-allow-methods": "POST,GET,OPTIONS" };
-  await ctx.route("https://p.open.qq.com/**", (route) => {
-    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
-    return route.fulfill({ contentType: "application/json", headers: CORS, body: JSON.stringify({ ret: 0, data: { total: 2, list: [
-      { appId: "1105678901", pkgName: "com.yuxiaor", appName: "寓小二房东版" },
-      { appId: "1105678902", pkgName: "com.yuxiaor.misu", appName: "米宿管家" },
-    ] } }) });
-  });
+  await ctx.route("https://p.open.qq.com/**", (route) => route.request().method() === "OPTIONS"
+    ? route.fulfill({ status: 204, headers: CORS })
+    : route.fulfill({ contentType: "application/json", headers: CORS, body: JSON.stringify({ ret: 0, data: { total: 0, list: [] } }) }));
   await ctx.route("https://app.open.qq.com/**", (route) => {
     const u = route.request().url();
     if (u.includes("/apply_signature/apply_api/request")) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ret: 0, msg: "", data: { secret: "8f4c5dc2d0474226ac44e5c2af0691c7" } }) });
     if (u.includes("/cgi-bin/")) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ret: 0, msg: "", data: { userId: "7157850727738201088", name: "上海和住信息科技有限公司", registerStatus: 1 } }) });
-    return route.fulfill({ contentType: "text/html; charset=utf-8", body: TENCENT_HTML });
+    return route.fulfill(html(fixture("tencent.html")));
   });
+  step("open-console qq", { url: await openFromPlatform(platform, "qq") });
   const tc = await ctx.newPage();
   await tc.goto("https://app.open.qq.com/p/developer/team_manage/apply_api");
   await tc.waitForSelector("#apkgo-assistant-root", { state: "attached", timeout: 10000 });
   await tc.waitForTimeout(1200);
-  const cdp4 = await ctx.newCDPSession(tc);
-  await cdp4.send("DOM.enable"); await cdp4.send("Runtime.enable");
-  async function inShadow4(fnSrc) {
-    const { root } = await cdp4.send("DOM.getDocument", { depth: 0 });
-    const { nodeId: hostId } = await cdp4.send("DOM.querySelector", { nodeId: root.nodeId, selector: "#apkgo-assistant-root" });
-    const { node } = await cdp4.send("DOM.describeNode", { nodeId: hostId, pierce: true });
-    const { object } = await cdp4.send("DOM.resolveNode", { backendNodeId: node.shadowRoots[0].backendNodeId });
-    const r = await cdp4.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: `function(){ return (${fnSrc})(this); }`, returnByValue: true, awaitPromise: true });
-    if (r.exceptionDetails) throw new Error(r.exceptionDetails.text + " " + JSON.stringify(r.exceptionDetails.exception));
-    return r.result.value;
-  }
-  await inShadow4(`(sr) => { if (!sr.querySelector('.panel').classList.contains('open')) sr.querySelector('.launch').click(); }`);
-  await tc.waitForTimeout(500);
-  // 不手填任何应用信息：助手应当自己点开「安卓应用管理」取到列表
-  const beforeT = (await (await fetch(`${ORIGIN}/__received`)).json()).length;
-  await inShadow4(`(sr) => sr.querySelector('[data-oneclick]').click()`);
+  const sh3 = await shadow(tc);
+  await openPanel(sh3); await tc.waitForTimeout(500);
+  const before = (await received()).length;
+  must(await oneClick(sh3), "应用宝一键按钮不可点");
   await tc.waitForTimeout(2500);
-  step("tencent stage1", { msg: await inShadow4(`(sr) => (sr.querySelector('.msg')||{}).textContent`), navBtn: await inShadow4(`(sr) => { const b = sr.querySelector('[data-nav]'); return b && b.textContent.trim(); }`) });
-  const navBtn = await inShadow4(`(sr) => !!sr.querySelector('[data-nav]')`);
-  if (!navBtn) throw new Error("第一步之后没有出现「去应用列表页」按钮");
-  // 用户点一下跳转
-  await inShadow4(`(sr) => sr.querySelector('[data-nav]').click()`);
-  await tc.waitForLoadState("domcontentloaded");
-  await tc.waitForTimeout(5000);
-  const cdp5 = await ctx.newCDPSession(tc);
-  await cdp5.send("DOM.enable"); await cdp5.send("Runtime.enable");
-  async function inShadow5(fnSrc) {
-    const { root } = await cdp5.send("DOM.getDocument", { depth: 0 });
-    const { nodeId: hostId } = await cdp5.send("DOM.querySelector", { nodeId: root.nodeId, selector: "#apkgo-assistant-root" });
-    const { node } = await cdp5.send("DOM.describeNode", { nodeId: hostId, pierce: true });
-    const { object } = await cdp5.send("DOM.resolveNode", { backendNodeId: node.shadowRoots[0].backendNodeId });
-    const r = await cdp5.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: `function(){ return (${fnSrc})(this); }`, returnByValue: true, awaitPromise: true });
-    if (r.exceptionDetails) throw new Error(r.exceptionDetails.text);
-    return r.result.value;
-  }
-  step("tencent stage2", { url: tc.url(), msg: await inShadow5(`(sr) => (sr.querySelector('.msg')||{}).textContent`) });
-  const recvT = await (await fetch(`${ORIGIN}/__received`)).json();
-  const tcBody = recvT[recvT.length - 1] && recvT[recvT.length - 1].body;
-  step("tencent one-click", { msg: await inShadow5(`(sr) => (sr.querySelector('.msg')||{}).textContent`), newSubmissions: recvT.length - beforeT, store: tcBody && tcBody.store_name, user_id: tcBody && tcBody.config.user_id, secretLen: tcBody && (tcBody.config.access_secret || "").length, app_id_map: tcBody && tcBody.config.app_id_map });
-  const tcMap = tcBody && tcBody.config.app_id_map ? JSON.parse(tcBody.config.app_id_map) : {};
-  if (!tcBody || tcBody.store_name !== "tencent" || tcBody.config.user_id !== "7157850727738201088") throw new Error("应用宝一键流程没把 user_id / access_secret 保存到服务端");
-  if (tcMap["com.yuxiaor"] !== "1105678901" || tcMap["com.yuxiaor.misu"] !== "1105678902") throw new Error("应用宝没有从页面自己的返回里自动合成 app_id_map：" + JSON.stringify(tcMap));
-  await tc.screenshot({ path: path.join(HERE, "../../dist/shots/08-tencent.png") });
+  recv = await received();
+  const qq = recv[recv.length - 1];
+  const navBtn = await sh3(`(sr) => !!sr.querySelector('[data-nav]')`);
+  const qqMsg = await msgText(sh3);
+  step("qq one-click", { msg: qqMsg, newSubmissions: recv.length - before, navBtn, channel: qq.body.channel, configInfo: qq.body.configInfo });
+  must(!navBtn, "应用宝不该再有「去应用列表页」按钮");
+  must(recv.length === before + 1 && qq.body.channel === "qq" && qq.body.configInfo.userId === "7157850727738201088" && qq.body.configInfo.accessSecret.length === 32, "应用宝没把 userId / accessSecret 保存到平台");
+  must(!("app_id_map" in qq.body.configInfo), "应用宝不该再有 app_id_map");
+  must(/暂不支持在线验证/.test(qqMsg), "应用宝应提示不支持在线验证：" + qqMsg);
+  await tc.screenshot({ path: path.join(SHOTS, "08-qq.png") });
 
-  // 8. 弹窗页能打开、显示已连接
+  // 9. 弹窗：已连接、六家、没有 apkgo 文案
   const popup = await ctx.newPage();
   await popup.goto(`chrome-extension://${new URL(sw.url()).host}/src/popup/popup.html`);
   await popup.waitForTimeout(600);
-  step("popup", { conn: await popup.locator("#conn").innerText(), stores: await popup.locator("#stores").innerText() });
-  await popup.screenshot({ path: path.join(HERE, "../../dist/shots/04-popup.png") });
+  const pop = { conn: await popup.locator("#conn").innerText(), stores: await popup.locator("#stores").innerText(), body: await popup.locator("body").innerText() };
+  step("popup", { conn: pop.conn, stores: pop.stores });
+  must(/已连接 · 张三/.test(pop.conn), "弹窗应显示已连接与用户名");
+  must(["华为", "小米", "OPPO", "vivo", "荣耀", "应用宝"].every((n) => pop.stores.includes(n)) && !/apkgo/i.test(pop.body), "弹窗商店列表或文案不对");
+  await popup.screenshot({ path: path.join(SHOTS, "04-popup.png") });
   out.ok = true;
 } catch (e) {
   out.ok = false; out.error = String(e && e.stack || e); console.error(out.error);
 } finally {
   await ctx.close();
-  fs.mkdirSync(path.join(HERE, "../../dist/shots"), { recursive: true }); fs.writeFileSync(path.join(HERE, "../../dist/e2e-result.json"), JSON.stringify(out, null, 2));
+  fs.mkdirSync(SHOTS, { recursive: true }); fs.writeFileSync(path.join(HERE, "../../dist/e2e-result.json"), JSON.stringify(out, null, 2));
   console.log(out.ok ? "E2E_OK" : "E2E_FAIL");
 }
