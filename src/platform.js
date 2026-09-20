@@ -11,7 +11,11 @@ const APKGO_PLATFORM = (() => {
 
   async function getPaired() {
     const { [APKGO.KEY_PAIRED]: p } = await chrome.storage.local.get(APKGO.KEY_PAIRED);
-    return p || null;
+    if (!p) return null;
+    // 0.5.0 的配对记录是 { origin, apiKey, orgId, orgName }，换后端后不再可用；
+    // 留着会让面板显示「已连接」却存不进去，还会把主体名发往旧域名。直接作废。
+    if (!p.accessToken || !p.refreshToken) { await clearPaired(); return null; }
+    return p;
   }
   async function setPaired(p) { await chrome.storage.local.set({ [APKGO.KEY_PAIRED]: p }); }
   async function clearPaired() { await chrome.storage.local.remove(APKGO.KEY_PAIRED); }

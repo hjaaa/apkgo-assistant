@@ -27,6 +27,17 @@ test("未配对：不发请求，提示去连接", async () => {
   assert.equal(r.ok, false); assert.equal(r.status, 0); assert.equal(calls.length, 0); assert.match(r.error, /连接助手/);
 });
 
+test("0.5.0 的旧配对记录视为未配对，并被清除", async () => {
+  const { calls, chrome, P } = setup([]);
+  await chrome.storage.local.set({ paired: { origin: "https://apkgo.baici.tech", apiKey: "apkgo_x", orgId: 1, orgName: "某组织", pairedAt: 1 } });
+  const r = await P.request("/x");
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 0);
+  assert.match(r.error, /连接助手/);
+  assert.equal(calls.length, 0);
+  assert.equal(chrome.storage.local.data.paired, undefined);
+});
+
 test("publicPaired 不带 token", () => {
   const { P } = setup([]);
   assert.deepEqual(P.publicPaired(PAIRED), { origin: ORIGIN, userName: "张三", pairedAt: 1 });

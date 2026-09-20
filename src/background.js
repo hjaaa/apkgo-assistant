@@ -57,6 +57,7 @@ const handlers = {
       ? await APKGO_PLATFORM.request(CONFIG_PATH + "/edit", { method: "PUT", body: JSON.stringify({ id: exist.id, ...body }) })
       : await APKGO_PLATFORM.request(CONFIG_PATH + "/add", { method: "POST", body: JSON.stringify(body) });
     if (!r.ok) return r;
+    if (r.data === false) return { ok: false, status: r.status, error: "配置平台没有保存成功，请重试" };
     return { ok: true, saved: { verified: channel !== "qq" } };
   },
 
