@@ -112,7 +112,7 @@
 
 ### 5.4 `src/shared.js`
 
-- `DEFAULT_ORIGIN` 改 `http://192.168.1.18:16003`；新增 `PLATFORM_SECRET_PAGE(owner)` 生成主体页深链。
+- `DEFAULT_ORIGIN` 改 `http://192.168.1.18:16003`；新增 `KEY_OWNER(storeId)`（session 里按商店存主体）与 `platformSecretPage(owner, origin)` 生成主体页深链。
 - 删 `errorHint`。
 - `recipeById` 去掉别名表（网页发的就是渠道值），保留大小写与空白归一。
 
@@ -169,12 +169,12 @@
 - `hello()`：发 `{type: "hello"}`。
 - `pair()`：从 `store.state.common.token` 取 `access_token` / `refresh_token`，从 `localStorage.userInfo` 的 `nickName` 取用户名（登录与刷新都会写这个键；无则空串），发 `{type: "pair", accessToken, refreshToken, userName}`。
 - `openConsole(store, owner)`：发 `{type: "open-console", store, owner}`。
-- `listen(handler)` / `unlisten`：只接收 `e.source === window && e.origin === location.origin && e.data.source === "apkgo-assistant"` 的消息，分发 `ready` / `paired` / `error` / `open-console-ok`。
+- `listen(handler)`：只接收 `e.source === window && e.origin === location.origin && e.data.source === "apkgo-assistant"` 的消息，分发 `ready` / `paired` / `error` / `open-console-ok`；返回解绑函数。
 
 ### 6.2 `SecretDialog.vue`
 
 - 表格上方加状态条：`extension: "none" | "unpaired" | "paired"`，文案分别为"未检测到密钥助手扩展"、"已安装，未连接"、"已连接 · 用户名"；右侧「连接助手」按钮（`none` 时禁用，`paired` 时显示"重新连接"）。
-- 弹窗 `init` 时发 `hello`，1 秒内没收到 `ready` 视为 `none`。
+- 弹窗 `init` 时状态重置为 `none` 并发 `hello`；收到 `ready` 才变为 `unpaired` / `paired`。
 - 操作列每行加「助手采集」按钮（`paired` 时可用），点击发 `open-console(row.value, this.owner)`；收到 `error` 时 `$message.error`。
 - 弹窗打开期间监听 `visibilitychange`，回到前台时 `getTableData()`；`closed` 时解绑。
 - `SecretFormDialog.vue`（手动路径）与 `api/productConfig.js` 不动。
@@ -215,4 +215,4 @@
 
 ## 10. 提交拆分
 
-扩展仓库四笔：① 换后端与配对协议（manifest、background、bridge、shared、console）② 配方字段改名与渠道调整（recipes）③ 改名与文档（popup、README、PRIVACY、CHANGELOG）④ e2e。前端仓库一笔：密钥配置弹窗接入助手。
+扩展仓库按实施计划的任务逐个提交（单测基座与 shared → platform.js → background/bridge/manifest → console → recipes → popup 与文档 → e2e，共七笔）；前端仓库一笔：密钥配置弹窗接入助手。
