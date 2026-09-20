@@ -5,7 +5,7 @@
 const APKGO = {
   VERSION: chrome.runtime.getManifest().version,
   // 配置平台地址。bridge 只注入在 manifest 列出的地址上，配对时以页面 origin 为准。
-  DEFAULT_ORIGIN: "http://192.168.1.18:16003",
+  DEFAULT_ORIGIN: "http://inner.dreamplatform.cn:18003",
   // storage.local：配对信息（平台 origin、用户 token、用户名）。
   KEY_PAIRED: "paired",
   // storage.session：采集草稿（按商店）、「刚从配置平台跳过来要打开面板」的标记、

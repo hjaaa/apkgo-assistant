@@ -37,6 +37,7 @@
     "https://developer.hihonor.com/*",
     "https://open.qq.com/*",
     "https://*.open.qq.com/*",
+    "http://inner.dreamplatform.cn:18003/*",
     "http://192.168.1.18:16003/*",
     "http://localhost/*"
   ],
@@ -83,6 +84,7 @@
     },
     {
       "matches": [
+        "http://inner.dreamplatform.cn:18003/*",
         "http://192.168.1.18:16003/*",
         "http://localhost/*"
       ],
