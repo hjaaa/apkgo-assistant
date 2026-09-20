@@ -1,8 +1,8 @@
 // 注入在各家商店后台页面上的助手面板。
 //
 // 三件事：把这家商店的「前置条件 + 步骤」贴在页面右下角；帮用户把密钥从页面上
-// 拿下来（自动识别标签旁边的值，或者进入「点选」模式点一下）；点保存直接调
-// apkgo 新建凭证并验证，结果就地显示。密钥草稿只放 storage.session。
+// 拿下来（自动识别标签旁边的值，或者进入「点选」模式点一下）；点保存直接存到
+// 配置平台（主体 + 渠道）并在线验证，结果就地显示。密钥草稿只放 storage.session。
 /* global APKGO, APKGO_PANEL_CSS */
 (() => {
   if (window.top !== window) return;
@@ -14,11 +14,12 @@
   const escLabel = (s) => String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
   const MARK = '<svg viewBox="12 16.5 76 76" fill="currentColor"><rect x="18" y="70" width="64" height="13" rx="6.5"/><rect x="18" y="51" width="64" height="13" rx="6.5"/><rect x="22" y="26" width="56" height="13" rx="6.5"/></svg>';
   const DRAFT_KEY = APKGO.KEY_DRAFT(recipe.id);
+  const OWNER_KEY = APKGO.KEY_OWNER(recipe.id);
 
   // ---- state ----
-  let draft = { label: "", config: {}, files: {}, appId: "" };
+  let draft = { config: {}, files: {} };
   let paired = null;
-  let apps = [];
+  let owner = ""; // 从配置平台「助手采集」带过来的主体；没有就不能保存
   let picking = null; // 正在点选的字段 key
   let result = null;  // { kind: ok|err|warn, html }
   let busy = false;
@@ -38,9 +39,9 @@
   root.appendChild(style);
   const launch = document.createElement("button");
   launch.className = "launch";
-  launch.title = `apkgo 助手 · ${recipe.cn}`;
-  const launchSub = recipe.flow && recipe.flow.length ? "一键获取密钥" : (recipe.fields.length ? "采集密钥，直接保存到 apkgo" : "这一家的密钥怎么拿");
-  launch.innerHTML = MARK + `<span class="lbl">apkgo 助手<small>${escLabel(recipe.cn)} · ${launchSub}</small></span><span class="dot"></span>`;
+  launch.title = `密钥助手 · ${recipe.cn}`;
+  const launchSub = recipe.flow && recipe.flow.length ? "一键获取密钥" : (recipe.fields.length ? "采集密钥，直接保存到配置平台" : "这一家的密钥怎么拿");
+  launch.innerHTML = MARK + `<span class="lbl">密钥助手<small>${escLabel(recipe.cn)} · ${launchSub}</small></span><span class="dot"></span>`;
   const panel = document.createElement("div");
   panel.className = "panel";
   const pickbar = document.createElement("div");
@@ -53,7 +54,7 @@
   bubble.className = "bubble";
   const bubbleText = recipe.flow && recipe.flow.length
     ? `${escLabel(recipe.cn)}的密钥在哪？点这里，一键获取 👇`
-    : (recipe.fields.length ? `${escLabel(recipe.cn)}的密钥在哪？点这里，帮你找到并存进 apkgo 👇` : `${escLabel(recipe.cn)}的密钥怎么拿？点这里看步骤 👇`);
+    : (recipe.fields.length ? `${escLabel(recipe.cn)}的密钥在哪？点这里，帮你找到并存进配置平台 👇` : `${escLabel(recipe.cn)}的密钥怎么拿？点这里看步骤 👇`);
   bubble.innerHTML = `<span>${bubbleText}</span><button class="bx" title="知道了">×</button>`;
   bubble.addEventListener("click", (e) => {
     if (e.target.classList.contains("bx")) { hideBubble(); return; }
@@ -87,8 +88,13 @@
     launch.classList.toggle("has-draft", captured > 0);
 
     const connHtml = paired
-      ? `<div class="conn"><span class="sdot"></span><span>已连接 apkgo · ${esc(paired.orgName)}</span></div>`
-      : `<div class="conn off"><span class="sdot"></span><span>还没连接。去 <a href="${esc(APKGO.DEFAULT_ORIGIN)}/credentials/new?store=${recipe.id}" target="_blank" rel="noopener">apkgo 添加商店账号页</a> 点「连接助手」。</span></div>`;
+      ? `<div class="conn"><span class="sdot"></span><span>已连接配置平台 · ${esc(paired.userName || paired.origin)}</span></div>`
+      : `<div class="conn off"><span class="sdot"></span><span>还没连接。去 <a href="${esc(APKGO.platformSecretPage(""))}" target="_blank" rel="noopener">配置平台的「主体」页</a>，打开密钥配置弹窗点「连接助手」。</span></div>`;
+    // 主体从配置平台「助手采集」带过来；没有就不能保存，免得存错主体。
+    const ownerHtml = owner
+      ? `<div class="conn" style="margin-top:6px"><span class="sdot"></span><span>将保存到主体：<b>${esc(owner)}</b></span></div>`
+      : `<div class="conn off" style="margin-top:6px"><span class="sdot"></span><span>没有主体上下文。回配置平台的密钥配置弹窗点「助手采集」再过来。</span></div>`;
+    const canSave = !!(paired && owner);
 
     const preHtml = recipe.prereq.length
       ? `<div class="sec"><div class="sec-t">先确认</div><ul class="pre">${recipe.prereq.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></div>` : "";
@@ -102,13 +108,11 @@
       formHtml = `<div class="sec"><div class="sec-t" style="display:flex;justify-content:space-between;align-items:center">采集
         ${autoable ? '<button class="mini" data-act="auto">自动识别本页</button>' : ""}</div>` +
         fields.map((f) => fieldHtml(f)).join("") +
-        (hasFlow ? "" : `<div class="field"><label>备注名（可选）</label><input class="in" data-k="__label" placeholder="默认「${esc(recipe.cn)}账号」，同一商店多个账号时区分" value="${esc(draft.label)}"></div>`) +
-        (apps.length ? `<div class="field"><label>关联应用（可选，验证时会更严格）</label><select class="sel" data-k="__app"><option value="">不关联</option>${apps.map((a) => `<option value="${esc(a.id)}" ${draft.appId === a.id ? "selected" : ""}>${esc(a.name)} · ${esc(a.pkg)}</option>`).join("")}</select></div>` : "") +
         (result && !hasFlow ? `<div class="msg ${result.kind}">${result.html}</div>` : "") +
-        `<div class="actions"><button class="btn acc" data-act="save" ${busy || !paired ? "disabled" : ""}>${busy ? "保存并验证中…" : "保存到 apkgo 并验证"}</button><button class="btn ghost" data-act="clear">清空</button></div>
-        <div class="hint">保存时 apkgo 会连一次 ${esc(recipe.cn)}确认密钥可用。密钥加密保存，只在这台浏览器的会话里暂存。</div></div>`;
+        `<div class="actions"><button class="btn acc" data-act="save" ${busy || !canSave ? "disabled" : ""}>${busy ? "保存并验证中…" : "保存到配置平台并验证"}</button><button class="btn ghost" data-act="clear">清空</button></div>
+        <div class="hint">保存时配置平台会连一次 ${esc(recipe.cn)}确认密钥可用。密钥只在这台浏览器的会话里暂存，保存成功即清除。</div></div>`;
     } else {
-      formHtml = `<div class="msg warn">这一家的密钥是文件形式，请按上面的步骤拿到文件后，回到 <a href="${esc((paired && paired.origin) || APKGO.DEFAULT_ORIGIN)}/credentials/new?store=${recipe.id}" target="_blank" rel="noopener">apkgo 添加页</a> 上传。</div>` +
+      formHtml = `<div class="msg warn">这一家的密钥是文件形式，请按上面的步骤拿到文件后，回到 <a href="${esc(APKGO.platformSecretPage(owner, paired && paired.origin))}" target="_blank" rel="noopener">配置平台的密钥配置弹窗</a> 手动填写。</div>` +
         (result ? `<div class="msg ${result.kind}">${result.html}</div>` : "");
     }
 
@@ -116,25 +120,24 @@
     if (hasFlow) {
       // 一键模式：包含需要手动填写的必填字段（如需）+ 备注名 + 一键按钮 + 进度
       const running = stage !== "idle" && stage !== "done" && stage !== "error";
-      const extraFields = recipe.hideWizardFields ? [] : recipe.fields.filter((f) => !f.kind.startsWith("file") && f.required && !f.capture && !f.auto && f.key !== "private_key");
+      const extraFields = recipe.hideWizardFields ? [] : recipe.fields.filter((f) => !f.kind.startsWith("file") && f.required && !f.capture && !f.auto && f.key !== "privateKey");
       const extraFieldsHtml = extraFields.map((f) => fieldHtml(f)).join("");
       const doneText = recipe.doneBtnText || "再获取一个";
       const wizardHint = recipe.wizardHint || `扩展会跳到密钥页、打开创建弹窗并填好；唯一留给你的是弹窗上的「确认」。之后下载、保存、验证自动完成。`;
       const wizard = `<div class="sec wizard">
         ${extraFieldsHtml}
-        <div class="field"><label>备注名（可选）</label><input class="in" data-k="__label" placeholder="默认「${esc(recipe.cn)}账号」，同一商店多个账号时区分" value="${esc(draft.label)}" ${running ? "disabled" : ""}></div>
-        <button class="btn acc" data-oneclick="1" ${running || !paired ? "disabled" : ""}>${running ? "进行中…" : stage === "done" ? doneText : "一键获取密钥"}</button>
+        <button class="btn acc" data-oneclick="1" ${running || !canSave ? "disabled" : ""}>${running ? "进行中…" : stage === "done" ? doneText : "一键获取密钥"}</button>
         ${stage === "idle" ? `<div class="hint">${esc(wizardHint)}</div>` : stage === "done" && recipe.doneHint ? `<div class="hint">${esc(recipe.doneHint)}</div>` : ""}
         ${progressHtml()}
         ${pendingNav ? `<button class="btn acc" data-nav="1" style="margin-top:10px">${esc(pendingNav.label)}</button><div class="hint">会打开 ${esc(pendingNav.url.replace(/^https?:\/\//, ""))}，落地后自动接着采集。</div>` : ""}
       </div>`;
       const manual = recipe.noManual ? "" : `<details class="manual" ${manualOpen ? "open" : ""}><summary>手动模式：自己按步骤操作、选文件</summary>${preHtml}${stepsHtml}${formHtml}</details>`;
-      bodyHtml = connHtml + '<div style="height:12px"></div>' + wizard + manual;
+      bodyHtml = connHtml + ownerHtml + '<div style="height:12px"></div>' + wizard + manual;
     } else {
-      bodyHtml = connHtml + '<div style="height:12px"></div>' + preHtml + stepsHtml + formHtml;
+      bodyHtml = connHtml + ownerHtml + '<div style="height:12px"></div>' + preHtml + stepsHtml + formHtml;
     }
     panel.innerHTML = `
-      <div class="head"><span class="mark">${MARK}</span><div class="t">apkgo 助手<small>${esc(recipe.cn)} · ${esc(recipe.product)}</small></div><button class="x" data-act="close" title="收起">×</button></div>
+      <div class="head"><span class="mark">${MARK}</span><div class="t">密钥助手<small>${esc(recipe.cn)} · ${esc(recipe.product)}</small></div><button class="x" data-act="close" title="收起">×</button></div>
       <div class="body">${bodyHtml}</div>`;
     if (result) { const m = panel.querySelector(".msg"); if (m) m.scrollIntoView({ block: "nearest" }); }
   }
@@ -143,7 +146,7 @@
     if (stage === "idle") return "";
     const defaultOrder = ["goto", "filling", "confirm", "captured", "saving", "done"];
     const order = recipe.progressOrder || defaultOrder;
-    const defaultLabels = { goto: "跳到密钥页", filling: "打开创建弹窗并填好", confirm: "你点弹窗上的「确认」", captured: "抓到下载的密钥文件", saving: "保存到 apkgo 并验证", done: "完成" };
+    const defaultLabels = { goto: "跳到密钥页", filling: "打开创建弹窗并填好", confirm: "你点弹窗上的「确认」", captured: "抓到下载的密钥文件", saving: "保存到配置平台并验证", done: "完成" };
     const labels = Object.assign(defaultLabels, recipe.progressLabels || {});
     const cur = stage === "error" ? -1 : order.indexOf(stage);
     const items = order.filter((k) => k !== "done").map((k, i) => {
@@ -191,7 +194,7 @@
     if (!t) return;
     if (t.dataset.act === "close") return togglePanel(false);
     if (t.dataset.act === "auto") return autoDetect();
-    if (t.dataset.act === "clear") { draft = { label: "", config: {}, files: {}, appId: draft.appId }; result = null; await saveDraft(); return render(); }
+    if (t.dataset.act === "clear") { draft = { config: {}, files: {} }; result = null; await saveDraft(); return render(); }
     if (t.dataset.act === "save") return submit();
     if (t.dataset.action) return runAction(t.dataset.action);
     if (t.dataset.oneclick) return oneClick();
@@ -209,14 +212,12 @@
   panel.addEventListener("input", async (e) => {
     const k = e.target.dataset.k;
     if (!k) return;
-    if (k === "__label") draft.label = e.target.value;
-    else draft.config[k] = e.target.value;
+    draft.config[k] = e.target.value;
     e.target.classList.toggle("ok", !!e.target.value);
     await saveDraft();
     launch.classList.toggle("has-draft", recipe.fields.some((f) => valueOf(f)));
   });
   panel.addEventListener("change", async (e) => {
-    if (e.target.dataset.k === "__app") { draft.appId = e.target.value; await saveDraft(); return; }
     const fk = e.target.dataset.file;
     if (!fk) return;
     const file = e.target.files && e.target.files[0];
@@ -263,23 +264,20 @@
   async function loadDraft() {
     try {
       const { [DRAFT_KEY]: d } = await chrome.storage.session.get(DRAFT_KEY);
-      if (d) draft = { label: "", config: {}, files: {}, appId: "", ...d };
+      if (d) draft = { config: {}, files: {}, ...d };
     } catch { /* session storage 不可用时就只在内存里 */ }
   }
   async function saveDraft() {
     try { await chrome.storage.session.set({ [DRAFT_KEY]: draft }); } catch { /* ignore */ }
   }
   async function clearDraft() {
-    draft = { label: "", config: {}, files: {}, appId: "" };
+    draft = { config: {}, files: {} };
     try { await chrome.storage.session.remove(DRAFT_KEY); } catch { /* ignore */ }
   }
   async function refreshState() {
     const st = await APKGO.send({ type: "state" });
     paired = st.ok ? st.paired : null;
-    if (paired && !apps.length && recipe.fields.length) {
-      const r = await APKGO.send({ type: "apps" });
-      if (r.ok) apps = r.apps;
-    }
+    try { ({ [OWNER_KEY]: owner = "" } = await chrome.storage.session.get(OWNER_KEY)); } catch { owner = ""; }
     render();
   }
 
@@ -646,6 +644,10 @@
     if (!flow.length) return;
     const isReset = stage === "done";
     result = null;
+    if (!paired || !owner) {
+      result = { kind: "warn", html: paired ? "没有主体上下文：回配置平台的密钥配置弹窗点「助手采集」再过来。" : "还没连接配置平台。" };
+      return render();
+    }
 
     // 预检：如果尚未登录，提醒用户先登录开发者账号
     const loggedIn = await checkLogin();
@@ -661,7 +663,6 @@
 
     if (isReset) {
       for (const f of recipe.fields) delete draft.config[f.key];
-      delete draft.config.private_key;
       await saveDraft();
     }
     if (!onConsolePage()) {
@@ -722,7 +723,7 @@
     const f = recipe.fields.find((x) => x.capture && ((x.capture.name && x.capture.name.test(name || "")) || (x.capture.mime && x.capture.mime.test(mime || ""))));
     if (!f || !text) return;
     const fp = fingerprint(text);
-    if (fp === lastSaved) { result = { kind: "ok", html: `这份 ${esc(name || "文件")} 刚才已经保存到 apkgo 了，不用再存。` }; togglePanel(true); render(); return; }
+    if (fp === lastSaved) { result = { kind: "ok", html: `这份 ${esc(name || "文件")} 刚才已经保存到配置平台了，不用再存。` }; togglePanel(true); render(); return; }
     if (fp === lastCapture) return;
     lastCapture = fp;
     draft.config[f.key] = f.kind === "file-text" ? text : btoa(unescape(encodeURIComponent(text)));
@@ -742,6 +743,7 @@
   // ---- submit ----
   async function submit(capturedFp) {
     if (busy) return;
+    if (!paired || !owner) { result = { kind: "warn", html: paired ? "没有主体上下文，回配置平台的密钥配置弹窗点「助手采集」再过来。" : "还没连接配置平台。" }; return render(); }
     const missing = recipe.fields.filter((f) => f.required && !draft.config[f.key]);
     if (missing.length) { result = { kind: "warn", html: "还差：" + missing.map((f) => esc(f.label)).join("、") }; return render(); }
     if (typeof recipe.validate === "function") {
@@ -751,23 +753,22 @@
     busy = true; result = null; render();
     let config = {};
     for (const f of recipe.fields) if (draft.config[f.key]) config[f.key] = draft.config[f.key];
-    // finalize 还能看到完整草稿：actions 自动算出来的中间值（如应用宝的包名→App ID
-    // 映射）不是声明字段，不会进 config，得从这里取。
+    // finalize 把采集结果整理成配置平台要的 configInfo（华为拆 JSON、小米带公钥）；
+    // 第二个参数是完整草稿，actions 算出来的中间值从这里取。
     if (recipe.finalize) config = recipe.finalize(config, draft.config);
-    const r = await APKGO.send({ type: "submit", store: recipe.id, label: draft.label.trim(), config, appId: draft.appId });
+    const r = await APKGO.send({ type: "submit", store: recipe.id, owner, config });
     busy = false;
     if (r.ok) {
-      const link = `<a href="${esc(paired.origin)}/credentials" target="_blank" rel="noopener">在 apkgo 里查看</a>`;
-      result = r.credential.verified
-        ? { kind: "ok", html: `已保存，${esc(recipe.cn)}验证通过。${link}，或者继续采集下一家。` }
-        : { kind: "ok", html: `已保存。${esc(recipe.cn)}这次没能完成验证（接口没探到或被跳过），发布时仍会用它。${link}` };
+      const link = `<a href="${esc(APKGO.platformSecretPage(owner, paired && paired.origin))}" target="_blank" rel="noopener">在配置平台查看</a>`;
+      result = r.saved && r.saved.verified
+        ? { kind: "ok", html: `已保存到配置平台，${esc(recipe.cn)}在线验证通过。${link}，或者继续采集下一家。` }
+        : { kind: "ok", html: `已保存到配置平台。${esc(recipe.cn)}暂不支持在线验证，发布时会直接使用这组密钥。${link}` };
       if (capturedFp) lastSaved = capturedFp;
       await clearDraft();
       launch.classList.remove("has-draft");
       if (stage !== "idle") { stage = "done"; }
     } else {
-      const hint = APKGO.errorHint(r.error);
-      result = { kind: "err", html: `${esc(r.error)}${hint ? `<div class="hint" style="color:inherit;opacity:.85">${esc(hint)}</div>` : ""}` };
+      result = { kind: "err", html: esc(r.error) };
       if (r.status === 401) paired = null;
       if (stage !== "idle") { stage = "error"; errorAt = 4; if (!recipe.noManual) manualOpen = true; }
     }
