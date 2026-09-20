@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "apkgo 助手",
-  "short_name": "apkgo 助手",
-  "version": "0.5.0",
-  "description": "在华为、小米、OPPO、vivo、荣耀、应用宝开发者后台里一键取回 API 密钥，直接保存到 apkgo cloud 并验证。开源，只连 apkgo。",
+  "name": "密钥助手",
+  "short_name": "密钥助手",
+  "version": "0.6.0",
+  "description": "在华为、小米、OPPO、vivo、荣耀、应用宝开发者后台里一键取回 API 密钥，直接保存到配置平台并在线验证。只连配置平台。",
   "minimum_chrome_version": "116",
   "icons": {
     "16": "icons/16.png",
@@ -12,7 +12,7 @@
     "128": "icons/128.png"
   },
   "action": {
-    "default_title": "apkgo 助手",
+    "default_title": "密钥助手",
     "default_popup": "src/popup/popup.html",
     "default_icon": {
       "16": "icons/16.png",
@@ -37,12 +37,8 @@
     "https://developer.hihonor.com/*",
     "https://open.qq.com/*",
     "https://*.open.qq.com/*",
-    "https://apkgo.baici.tech/*",
+    "http://192.168.1.18:16003/*",
     "http://localhost/*"
-  ],
-  "optional_host_permissions": [
-    "https://*/*",
-    "http://*/*"
   ],
   "content_scripts": [
     {
@@ -87,7 +83,7 @@
     },
     {
       "matches": [
-        "https://apkgo.baici.tech/*",
+        "http://192.168.1.18:16003/*",
         "http://localhost/*"
       ],
       "js": [

@@ -1,103 +1,75 @@
-// 后台 service worker：保管配对信息、替内容脚本调 apkgo Open API、开后台页。
-// 扩展里所有的网络请求都在这一个文件里，而且只会发往配对时记下的 apkgo 域名。
-/* global APKGO, APKGO_RECIPES */
-importScripts("recipes.js", "shared.js");
+// 后台 service worker：保管配对信息、替内容脚本调配置平台接口、开后台页。
+// 发往配置平台的请求都走 platform.js（APKGO_PLATFORM），只会发往配对时记下的平台地址。
+/* global APKGO, APKGO_PLATFORM */
+importScripts("recipes.js", "shared.js", "platform.js");
 
 // 采集草稿放 storage.session，内容脚本要能直接读写，得先放开访问级别。
 chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" }).catch(() => {});
 
-async function getPaired() {
-  const { [APKGO.KEY_PAIRED]: p } = await chrome.storage.local.get(APKGO.KEY_PAIRED);
-  return p || null;
-}
-
-function publicPaired(p) {
-  return p ? { origin: p.origin, orgId: p.orgId, orgName: p.orgName, pairedAt: p.pairedAt } : null;
-}
-
-async function hostGranted(origin) {
-  try { return await chrome.permissions.contains({ origins: [origin + "/*"] }); } catch { return false; }
-}
-
-// 调 apkgo Open API。返回 { ok, status, data | error }。
-async function apkgoFetch(path, init = {}) {
-  const p = await getPaired();
-  if (!p) return { ok: false, status: 0, error: "还没连接 apkgo，请在 apkgo 的「添加商店账号」页点「连接助手」" };
-  let res;
-  try {
-    res = await fetch(p.origin + path, {
-      ...init,
-      headers: { "Content-Type": "application/json", "X-API-Key": p.apiKey, ...(init.headers || {}) },
-    });
-  } catch (e) {
-    return { ok: false, status: 0, error: "连不上 " + p.origin + "：" + (e.message || e) };
-  }
-  let body = null;
-  try { body = await res.json(); } catch { /* 非 JSON */ }
-  if (!res.ok) {
-    const msg = (body && body.error) || `HTTP ${res.status}`;
-    return { ok: false, status: res.status, error: res.status === 401 ? "连接已失效（密钥被吊销或已过期），请回到 apkgo 添加页重新连接" : msg };
-  }
-  return { ok: true, status: res.status, data: body && body.data !== undefined ? body.data : body };
-}
+const CONFIG_PATH = "/product/owner-open-platform-config";
 
 const handlers = {
   async state() {
-    const p = await getPaired();
-    return { ok: true, version: APKGO.VERSION, paired: publicPaired(p), hostGranted: p ? await hostGranted(p.origin) : false };
+    const p = await APKGO_PLATFORM.getPaired();
+    return { ok: true, version: APKGO.VERSION, paired: APKGO_PLATFORM.publicPaired(p) };
   },
 
   // 只接受和发消息的页面同源的 origin（bridge 已经校验过一遍，这里再兜底），
-  // 存之前用密钥调一次只读接口确认它真的可用。
-  async pair({ apiKey, origin, orgId, orgName }, sender) {
-    if (!apiKey || !/^apkgo_[0-9a-f]{32,}$/.test(apiKey)) return { ok: false, error: "密钥格式不对" };
+  // 存之前用 token 调一次只读接口确认它真的可用。
+  async pair({ accessToken, refreshToken, userName, origin }, sender) {
+    const at = typeof accessToken === "string" ? accessToken.trim() : "";
+    const rt = typeof refreshToken === "string" ? refreshToken.trim() : "";
+    if (!at || !rt) return { ok: false, error: "没有拿到登录令牌，请先登录配置平台再点「连接助手」" };
     let o;
     try { o = new URL(origin).origin; } catch { return { ok: false, error: "origin 不合法" }; }
     const senderOrigin = sender && sender.url ? new URL(sender.url).origin : "";
-    if (senderOrigin && senderOrigin !== o) return { ok: false, error: "配对来源和页面不一致" };
-    const rec = { origin: o, orgId, orgName, apiKey, pairedAt: Date.now() };
-    await chrome.storage.local.set({ [APKGO.KEY_PAIRED]: rec });
-    if (await hostGranted(o)) {
-      const r = await apkgoFetch("/openapi/v1/apps");
-      if (!r.ok) {
-        await chrome.storage.local.remove(APKGO.KEY_PAIRED);
-        return { ok: false, error: "密钥验证失败：" + r.error };
-      }
+    if (senderOrigin !== o) return { ok: false, error: "配对来源和页面不一致" };
+    const rec = { origin: o, accessToken: at, refreshToken: rt, userName: String(userName || ""), pairedAt: Date.now() };
+    await APKGO_PLATFORM.setPaired(rec);
+    const r = await APKGO_PLATFORM.request(CONFIG_PATH + "/list?page=1&size=1");
+    if (!r.ok) {
+      await APKGO_PLATFORM.clearPaired();
+      return { ok: false, error: "令牌验证失败：" + r.error };
     }
-    return { ok: true, paired: publicPaired(rec) };
+    return { ok: true, paired: APKGO_PLATFORM.publicPaired(rec) };
   },
 
   async unpair() {
-    await chrome.storage.local.remove(APKGO.KEY_PAIRED);
+    await APKGO_PLATFORM.clearPaired();
     await chrome.storage.session.clear();
     return { ok: true };
   },
 
-  async apps() {
-    const r = await apkgoFetch("/openapi/v1/apps");
-    if (!r.ok) return r;
-    const list = Array.isArray(r.data) ? r.data : [];
-    return { ok: true, apps: list.map((a) => ({ id: a.id, name: a.display_name || a.name, pkg: a.package_name })) };
-  },
-
-  // 新建凭证：和控制台走同一个 handler，服务端会先连商店验证一次再落库。
-  async submit({ store, label, config, appId }) {
+  // 保存到配置平台：(主体, 渠道) 唯一，已有记录就 edit 带 id，没有就 add。
+  // 后端保存时在线验活，通过才落库；应用宝渠道后端不验活。
+  async submit({ store, owner, config }) {
     const recipe = APKGO.recipeById(store);
     if (!recipe) return { ok: false, error: "未知商店 " + store };
-    const defaultLabel = store === "harmony" ? "HarmonyOS账号" : `${recipe.cn}账号`;
-    const body = { store_name: store, label: label || defaultLabel, config };
-    if (appId) body.app_id = appId;
-    const r = await apkgoFetch("/openapi/v1/credentials", { method: "POST", body: JSON.stringify(body) });
+    const o = owner == null ? "" : String(owner).trim();
+    if (!o) return { ok: false, error: "没有主体上下文，请回配置平台的密钥配置弹窗点「助手采集」" };
+    const channel = recipe.id;
+    const q = `?owner=${encodeURIComponent(o)}&channel=${encodeURIComponent(channel)}`;
+    const g = await APKGO_PLATFORM.request(CONFIG_PATH + "/get" + q);
+    if (!g.ok) return g;
+    const exist = g.data && g.data.id ? g.data : null;
+    const body = { owner: o, channel, configInfo: config };
+    const r = exist
+      ? await APKGO_PLATFORM.request(CONFIG_PATH + "/edit", { method: "PUT", body: JSON.stringify({ id: exist.id, ...body }) })
+      : await APKGO_PLATFORM.request(CONFIG_PATH + "/add", { method: "POST", body: JSON.stringify(body) });
     if (!r.ok) return r;
-    return { ok: true, credential: { id: r.data.id, verified: !!r.data.verified, label: r.data.label } };
+    return { ok: true, saved: { verified: channel !== "qq" } };
   },
 
-  async openConsole({ store, url }) {
+  // 从配置平台「助手采集」过来时带着主体；从弹窗「前往后台」过来时没有主体，面板会提示。
+  async openConsole({ store, owner, url }) {
     const recipe = APKGO.recipeById(store);
     const targetUrl = (recipe && recipe.console) || url;
     if (!targetUrl) return { ok: false, error: "未知商店 " + store };
     if (recipe) {
-      await chrome.storage.session.set({ [APKGO.KEY_PENDING]: recipe.id });
+      const session = { [APKGO.KEY_PENDING]: recipe.id };
+      const o = owner == null ? "" : String(owner).trim();
+      if (o) session[APKGO.KEY_OWNER(recipe.id)] = o;
+      await chrome.storage.session.set(session);
     }
     const tab = await chrome.tabs.create({ url: targetUrl });
     return { ok: true, tabId: tab.id };
@@ -136,7 +108,7 @@ function updateBadge(tabId, url) {
   chrome.action.setBadgeText({ tabId, text: on ? "●" : "" });
   if (on) {
     chrome.action.setBadgeBackgroundColor({ tabId, color: "#18E299" });
-    chrome.action.setTitle({ tabId, title: `apkgo 助手 · ${on.cn}后台` });
+    chrome.action.setTitle({ tabId, title: `密钥助手 · ${on.cn}后台` });
   }
 }
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => { if (info.status === "complete" || info.url) updateBadge(tabId, tab.url); });

@@ -1,4 +1,4 @@
-// 注入在 apkgo 网页上的桥：网页用 window.postMessage 和它说话，它转给后台。
+// 注入在配置平台网页上的桥：网页用 window.postMessage 和它说话，它转给后台。
 // 网页因此不需要知道扩展 ID，未打包的开发版也能配对。
 //
 // 安全边界：只回应同一 window、同源、source === "apkgo-web" 的消息；配对时
@@ -35,12 +35,12 @@
     if (d.type === "hello") {
       ready();
     } else if (d.type === "pair") {
-      if (d.origin !== location.origin) { reply({ type: "error", message: "配对来源不一致" }); return; }
-      const r = await send({ type: "pair", apiKey: d.apiKey, origin: location.origin, orgId: d.orgId, orgName: d.orgName });
+      // origin 永远取当前页面的，网页没法把扩展指向别的地址。
+      const r = await send({ type: "pair", accessToken: d.accessToken, refreshToken: d.refreshToken, userName: d.userName, origin: location.origin });
       if (r.ok) reply({ type: "paired", paired: r.paired });
       else reply({ type: "error", message: r.error });
     } else if (d.type === "open-console") {
-      const r = await send({ type: "openConsole", store: d.store, url: d.url });
+      const r = await send({ type: "openConsole", store: d.store, owner: d.owner, url: d.url });
       if (!r.ok) reply({ type: "error", message: r.error, action: "open-console" });
       else reply({ type: "open-console-ok", store: d.store });
     }
