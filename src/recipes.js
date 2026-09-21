@@ -241,49 +241,44 @@ const APKGO_RECIPES = [
         }
 
         // 2. 查找页面上的私钥
-        const findKey = (exclude) => {
+        // 只读「获取私钥」区块里那个展示私钥的 span，不扫整页——整页扫描会把
+        // 浏览器注入串或占位文案误当私钥。span 里出现的可能是占位文案，过滤掉。
+        const KEY_PLACEHOLDER = /未生成|已生成私钥数据|私钥生成中|请/;
+        const readShownKey = () => {
           for (const doc of h.docs()) {
-            const text = (doc.body && doc.body.innerText) || "";
-            const matches = text.match(/\b[a-zA-Z0-9]{40,64}\b/g) || [];
-            for (const m of matches) {
-              if (!/已生成|mideveloper|openplatform/i.test(m) && m !== exclude) return m;
-            }
-            for (const inp of doc.querySelectorAll("input, textarea")) {
-              const v = (inp.value || inp.placeholder || "").trim();
-              if (/^[a-zA-Z0-9]{40,64}$/.test(v) && !/已生成/.test(v) && v !== exclude) return v;
-            }
+            const el = doc.querySelector('[class*="buttonGroup"] [class*="download_button"] span');
+            const v = el ? (el.innerText || el.textContent || "").trim() : "";
+            if (/^[A-Za-z0-9]{16,}$/.test(v) && !KEY_PLACEHOLDER.test(v)) return v;
           }
           return "";
         };
 
-        let currentKey = findKey();
-        let key = currentKey;
+        const before = readShownKey();
+        let key = before;
 
-        // 如果明确是重置（isReset）或者页面上没有当前明文私钥，自动点击重置/生成
+        // 重置，或页面上还没显示私钥时，自动点「获取私钥/重置私钥」并确认，等出现新私钥。
+        // 按钮文案随小米改版：无私钥是「获取私钥」，已有私钥是「重置私钥」；重置弹窗确认是「确认重置」。
         if (h.isReset || !key) {
-          const btn = h.byText("button, a, div, span", /^重置私钥$/) ||
-                      h.byText("button, a, div, span", /^生成私钥$/) ||
-                      h.byText("button, a", /重置私钥|生成私钥/);
+          const btn = h.byText("button, a", /^(获取私钥|重置私钥|生成私钥)$/) ||
+                      h.byText("button, a", /获取私钥|重置私钥|生成私钥/);
           if (btn) {
             btn.click();
             await h.wait(400);
             for (const doc of h.docs()) {
               const confirmBtn = [...doc.querySelectorAll(".el-dialog button, .el-message-box button, .ant-modal button, button")]
-                .find((b) => /^(确定|确认)$/.test(h.textOf(b).trim()) && b.getClientRects().length);
+                .find((b) => /^(确定|确认|确认重置)$/.test(h.textOf(b).trim()) && b.getClientRects().length);
               if (confirmBtn) { confirmBtn.click(); break; }
             }
-            key = (await h.waitFor(() => {
-              const k = findKey(h.isReset ? currentKey : undefined);
-              return (h.isReset && currentKey) ? (k && k !== currentKey ? k : null) : k;
-            }, 5000)) || findKey();
+            // 必须等到与旧值不同的新私钥才算数；等不到就置空并报错，绝不回退旧值提交。
+            key = (await h.waitFor(() => { const k = readShownKey(); return k && k !== before ? k : null; }, 8000)) || "";
           }
         }
 
         if (!key) {
-          const btn = h.byText("button, a, div, span", /^(重置私钥|生成私钥)$/) || h.byText("button, a", /重置私钥|生成私钥/);
+          const btn = h.byText("button, a", /^(获取私钥|重置私钥|生成私钥)$/) || h.byText("button, a", /获取私钥|重置私钥|生成私钥/);
           if (btn) h.highlight(btn);
-          const btnName = btn ? h.textOf(btn).trim() : "重置私钥";
-          throw new Error(`未能自动提取到私钥。请在页面上点击绿框高亮的「${btnName}」，然后再点「一键获取密钥」。`);
+          const btnName = btn ? h.textOf(btn).trim() : "获取私钥";
+          throw new Error(`未能自动提取到私钥。请在页面上点击绿框高亮的「${btnName}」并确认，等私钥显示出来后再点「一键获取密钥」。`);
         }
 
         h.draft.config.privateKey = key;
