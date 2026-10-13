@@ -1,6 +1,6 @@
 {
   "name": "apkgo-assistant",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "apkgo 助手 Chrome/Edge 扩展。扩展本身不需要构建；这里只放端到端测试的依赖。",
   "type": "module",

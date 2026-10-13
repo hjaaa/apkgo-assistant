@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "密钥助手",
   "short_name": "密钥助手",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "在华为、小米、OPPO、vivo、荣耀、应用宝开发者后台里一键取回 API 密钥，直接保存到配置平台并在线验证。只连配置平台。",
   "minimum_chrome_version": "116",
   "icons": {
