@@ -264,22 +264,21 @@ const APKGO_RECIPES = [
         // 1. 登录检查与调取邮箱
         const phMatch = document.cookie.match(/mideveloper_ph=([^;]+)/);
         const uidMatch = document.cookie.match(/\buserId=([^;]+)/);
-        if (/login|account\.xiaomi\.com/i.test(location.href) || (!phMatch && !uidMatch && !h.draft.config.userName)) {
+        if (/login|account\.xiaomi\.com/i.test(location.href) || !phMatch || !uidMatch) {
           throw new Error("检测到您尚未登录小米开放平台，请先登录开发者账号后再获取密钥。");
         }
-        if (!h.draft.config.userName) {
-          try {
-            if (phMatch && uidMatch) {
-              const url = `/pltapi/uiue/user?edit=1&mideveloper_ph=${encodeURIComponent(phMatch[1])}&userId=${encodeURIComponent(uidMatch[1])}`;
-              const r = await fetch(url, { credentials: "include" });
-              if (r.ok) {
-                const d = await r.json();
-                if (d && d.data && d.data.email) h.draft.config.userName = d.data.email;
-              }
-            }
-          } catch { /* ignore */ }
-        }
-        if (!h.draft.config.userName) {
+        // 草稿按渠道缓存，切换账号后必须重新读取邮箱，不能与当前私钥混用。
+        let email = "";
+        try {
+          const url = `/pltapi/uiue/user?edit=1&mideveloper_ph=${encodeURIComponent(phMatch[1])}&userId=${encodeURIComponent(uidMatch[1])}`;
+          const r = await fetch(url, { credentials: "include" });
+          if (r.ok) {
+            const d = await r.json();
+            const value = d && d.data && d.data.email;
+            if (typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) email = value;
+          }
+        } catch { /* 获取失败时由下方统一报错，不回退到草稿邮箱 */ }
+        if (!email) {
           throw new Error("未能自动获取到开发者邮箱，请确认已登录小米开放平台。");
         }
 
@@ -324,6 +323,7 @@ const APKGO_RECIPES = [
           throw new Error(`未能自动提取到私钥。请在页面上点击绿框高亮的「${btnName}」并确认，等私钥显示出来后再点「一键获取密钥」。`);
         }
 
+        h.draft.config.userName = email;
         h.draft.config.privateKey = key;
         return `已自动获取邮箱（${h.draft.config.userName}）与私钥！正在保存并验证…`;
       },
