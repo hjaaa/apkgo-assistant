@@ -1,6 +1,6 @@
 # 华为新版凭证页面适配实施计划
 
-> **面向执行 agent：**按任务使用 `superpowers:executing-plans`（本计划建议）或 `superpowers:subagent-driven-development` 实施；用户已选择 Native。使用下方复选框记录进度，用户已选择 Native；真实创建与保存仍等待目标确认。
+> **面向执行 agent：**按任务使用 `superpowers:executing-plans`（本计划建议）或 `superpowers:subagent-driven-development` 实施；用户已选择 Native。使用下方复选框记录进度，用户已选择 Native，本地实现和模拟验证完成，真实验收等待目标确认。
 
 **目标：**恢复华为渠道在新版开发者中心的凭证采集，完成开发者级服务账号表单填写、公私钥生成、用户确认、JSON 捕获及配置平台保存。
 
@@ -8,7 +8,7 @@
 
 **技术栈：**经典 JavaScript 脚本、Chrome MV3、Node 内置 test runner、已有 Playwright 1.59.1、Python 构建脚本；不新增依赖。
 
-**设计依据：**本文件“已确认设计基线”一节，整理自 2026-10-13 本聊天中用户采用的方案；执行者应先阅读该节。方案已采用并完成本地实现及模拟验证，真实创建和保存的主体尚未确认。
+**设计依据：**本文件“已确认设计基线”一节，整理自 2026-10-13 本聊天中用户采用的方案；执行者应先阅读该节。方案已采用，本地实现及模拟验证完成，真实创建和保存的主体尚未确认。
 
 ## 全局约束
 
@@ -85,7 +85,7 @@
 | `test/e2e/fixtures/hdc-credentials.html` | 新建 | 默认项目级、开发者级、多区域创建按钮 |
 | `test/e2e/fixtures/hdc-service-account.html` | 新建 | 独立表单、异步生成与虚构 JSON 下载 |
 | `test/e2e/e2e.mjs` | 修改华为块 | 真实扩展在伪新版后台的端到端验证 |
-| `test/e2e/fake_platform.py` | 测试支撑修复 | 使用标准库线程服务器避免空闲连接阻塞，不改变端点 |
+| `test/e2e/fake_platform.py` | 测试支撑修复 | 标准库线程服务器避免空闲连接阻塞，端点不变 |
 | `README.md` | 更新华为段落 | 新入口、生成步骤和失败恢复 |
 
 不修改 `src/background.js`、`src/platform.js`、`src/shared.js`、manifest 或小米测试；不删除旧 AGC 夹具，本次 E2E 改用新夹具即可。不存在新 CLI、对外接口或后端改动。
@@ -173,12 +173,12 @@ assert.equal(s.counters.confirm, 0);
 
 **接口：**沿用 `npm test / npm run e2e / npm run build`，不增加 package 脚本，不改变构建版本。
 
-- [ ] 1. 更新华为说明：新版菜单 → 开发者级 → 服务账号凭证 → 创建 → 生成公私钥 → 用户确认 → 下载捕获；失败后重试保存用已有手动模式，不重新创建。其他渠道说明不修改。
-- [ ] 2. 运行 `npm test`；运行 `npm run e2e` 并执行 `node --input-type=module -e 'import fs from "node:fs"; const r=JSON.parse(fs.readFileSync("dist/e2e-result.json","utf8")); if(r.ok!==true) process.exit(1);'`，两者均通过才进入构建。
-- [ ] 3. 运行 `npm run build`；检查 `dist/apkgo-assistant-0.6.0.zip` 和 `.sha256`，核对归档内华为配方/console 与当前工作区内容相同，小米配方与用户基线相同。打包会包含保留的小米改动，不能把该包描述为“只有华为变更”；Git 提交范围与工作区打包内容分别报告。
-- [ ] 4. 精确暂存本任务文档，核对所有本次提交相对执行前 HEAD 的 diff 不含用户小米改动。保存未暂存小米差异，并检查没有真实密钥文件入 Git；提交「更新华为新版凭证采集说明」。
-- [ ] 5. 执行最终独立整体审查。风险为权限选择、异步生命周期与外部凭据创建流程，按全局约定使用 sp-deep：`gpt-6-astra / high`、`fork_turns: "none"`。给 reviewer 本计划、执行报告、BASE/HEAD、提交 diff、未提交状态、测试证据和包内容差异说明；reviewer 只读，不自行派发。
-- [ ] 6. 修复流程服从用户选择的执行技能：Native 由本会话一次修复，复现测试 RED→GREEN 与完整套件验证，不额外派发复审；SDD 按对应 task 审查轮次及最终 scoped re-review 规则。未解决问题明确列出，不凭单测通过免除审查。
+- [x] 1. 更新华为说明：新版菜单 → 开发者级 → 服务账号凭证 → 创建 → 生成公私钥 → 用户确认 → 下载捕获；失败后重试保存用已有手动模式，不重新创建。其他渠道说明不修改。
+- [x] 2. 运行 `npm test`；运行 `npm run e2e` 并执行 `node --input-type=module -e 'import fs from "node:fs"; const r=JSON.parse(fs.readFileSync("dist/e2e-result.json","utf8")); if(r.ok!==true) process.exit(1);'`，两者均通过才进入构建。
+- [x] 3. 运行 `npm run build`；检查 `dist/apkgo-assistant-0.6.0.zip` 和 `.sha256`，核对归档内华为配方/console 与当前工作区内容相同，小米配方与用户基线相同。打包会包含保留的小米改动，不能把该包描述为“只有华为变更”；Git 提交范围与工作区打包内容分别报告。
+- [x] 4. 精确暂存本任务文档，核对所有本次提交相对执行前 HEAD 的 diff 不含用户小米改动。保存未暂存小米差异，并检查没有真实密钥文件入 Git；提交「更新华为新版凭证采集说明」。
+- [x] 5. 执行最终独立整体审查。风险为权限选择、异步生命周期与外部凭据创建流程，按全局约定使用 sp-deep：`gpt-6-astra / high`、`fork_turns: "none"`。给 reviewer 本计划、执行报告、BASE/HEAD、提交 diff、未提交状态、测试证据和包内容差异说明；reviewer 只读，不自行派发。
+- [x] 6. 修复流程服从用户选择的执行技能：Native 由本会话一次修复，复现测试 RED→GREEN 与完整套件验证，不额外派发复审；SDD 按对应 task 审查轮次及最终 scoped re-review 规则。未解决问题明确列出，不凭单测通过免除审查。
 
 ## 任务 5：真实创建与保存验收关卡
 
@@ -194,7 +194,7 @@ assert.equal(s.counters.confirm, 0);
 
 ## 执行交接与回滚
 
-建议 Native：两个产品文件、任务之间接口紧密，主流程已有捕获/保存能力；在当前会话执行便于持续保护小米未提交内容，最后独立审查覆盖敏感部分。用户也可选择 SDD；用户已于 2026-10-13 选择 Native；按本会话实施并最终独立审查。
+建议 Native：两个产品文件、任务之间接口紧密，主流程已有捕获/保存能力；在当前会话执行便于持续保护小米未提交内容，最后独立审查覆盖敏感部分。用户也可选择 SDD；用户已于 2026-10-13 选择 Native。
 
 若需要隔离工作区，执行阶段先依 `using-git-worktrees` 检查现有 checkout。普通新 worktree 只包含提交内容，不会自动带上小米修改；必须按原字节复制配方与小米测试到执行 worktree 形成验证基线，标记用户拥有的差异，保持源 checkout 不变，不把这些差异混入华为提交。不要在规划阶段创建 worktree。
 
@@ -206,4 +206,8 @@ assert.equal(s.counters.confirm, 0);
 - `h.ensureHook(): Promise<boolean>` 在任务 1 消费、任务 2 实现；新生成状态仅在华为配方中按 Document 保存；输出字段、消息协议与后端路径不变。
 - 五项审查重点均有对应测试步骤；新夹具包含真实已观察的独立表单和 iframe 导航，避免重复旧弹窗测试造成误判。
 - 未以官方指南推断真实新 JSON 已验证；未把历史 `verified: true` 标志当作新版验收证据；未新增自动主体一致性校验业务规则。
-- 规划阶段仅新增本文件；执行阶段的华为实现与验证已记录，现有小米文件和原始暂存状态保持不变。
+- 本文件仅为实施计划；产品代码、现有小米文件、现有暂存状态未因计划编写修改。
+
+## 执行结果（2026-10-13）
+
+任务 1–4 已完成；任务 5 未执行真实创建或保存。当前项目单测 71/71、完整 E2E_OK（28 个记录步骤）、构建和包内源码校验通过；独立审查 1 项 Important 已由本会话以 RED→GREEN 回归修复，无额外复审。详情见 [执行记录](../reports/2026-10-13-huawei-credentials-execution.md)。
