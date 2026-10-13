@@ -34,29 +34,33 @@ function parseHuaweiServiceAccount(text) {
   const keyId = json.key_id || json.keyId;
   const privateKey = json.private_key || json.privateKey;
   const subAccount = json.sub_account || json.subAccount;
-  if (!keyId || !privateKey || !subAccount) return { error: "凭据文件无效，缺少 key_id / private_key / sub_account 字段" };
+  if (!keyId || !subAccount) return { error: "凭据文件无效，缺少 key_id / private_key / sub_account 字段" };
+  if (!privateKey) return { error: "凭据文件缺少 private_key，请在华为创建表单先点击『生成公私钥』，再确认并下载 JSON" };
   return { config: { keyId: String(keyId), privateKey: String(privateKey), subAccount: String(subAccount), projectId: String(json.project_id || json.projectId || "") } };
 }
 
+// 同一文档中也可能重新进入创建表单，生成来源同时绑定表单节点。
+const huaweiGeneratedPublicKeys = new WeakMap();
+
 const APKGO_RECIPES = [
   {
-    id: "huawei", verified: true, cn: "华为", product: "AppGallery Connect",
+    id: "huawei", verified: true, cn: "华为", product: "HarmonyOS 开发者中心",
     hostRe: /(^|\.)developer\.huawei\.com$/,
-    // 「用户与访问 → API密钥 → Connect API」那一页（2026-09 实登核对）。
-    console: "https://developer.huawei.com/consumer/cn/service/josp/agc/index.html#/ups/9249519184595983326",
-    prereq: ["需要团队管理员账号，否则顶部没有「用户与访问」", "华为提示「API 客户端」即将被 Service Account 替代，新建请选 Service Account"],
+    console: "https://developer.huawei.com/consumer/cn/hdc-console/index.html#/home/101653523124950083",
+    flowPages: [/^https:\/\/developer\.huawei\.com\/consumer\/cn\/hdc-console\/index\.html#\/home\/101653523124950083(?:\?[^#]*)?$/],
+    prereq: ["需要有权限创建开发者级服务账号凭证的账号", "请在确认前核对当前华为账号与配置平台的保存主体"],
     steps: [
-      { t: "登录 AppGallery Connect，顶部点「用户与访问」", d: "" },
-      { t: "左侧「API密钥 → Connect API」，停在「Service Account」页签", d: "列表里能看到已有的服务账号；配置平台需要一个「开发者级 · APP管理员」的。", action: "goto" },
-      { t: "点「创建」，填名称、选「开发者级」、勾「APP管理员」", d: "「帮我点」会打开弹窗并填好，最后的「确认」留给你点。", action: "open-create" },
-      { t: "点「确认」后下载 JSON，面板会自动抓到这个文件", d: "没抓到就手动「选文件」。JSON 只能下载一次。" },
+      { t: "进入「ID、证书和Profile → 凭证」，选择「开发者级凭证」", d: "配置平台需要开发者级服务账号凭证。", action: "goto" },
+      { t: "在「服务账号凭证」区域创建，填名称并勾「APP管理员」", d: "助手会准备独立表单并生成公私钥，最终确认由你点击。", action: "open-create" },
+      { t: "核对账号、主体和角色后点「确认」", d: "必须先生成公私钥，下载的 JSON 才包含私钥；未捕获时可手动选文件。" },
     ],
     fields: [
       { key: "serviceAccountJson", label: "服务账号 JSON 文件", kind: "file-text", accept: ".json,application/json", required: true, capture: { name: /\.json$/i, mime: /json/i } },
     ],
-    // 采到的是整个 JSON 文本；保存前先校验，提交时拆成配置平台要的四个字段。
     validate(cfg) { return cfg.serviceAccountJson ? (parseHuaweiServiceAccount(cfg.serviceAccountJson).error || "") : ""; },
     finalize(config) { return parseHuaweiServiceAccount(config.serviceAccountJson).config; },
+    wizardHint: "助手会进入开发者级服务账号表单、填好并生成公私钥。请核对账号与保存主体后亲自点「确认」，随后捕获 JSON 并保存验证。",
+    progressLabels: { goto: "进入新版凭证页", filling: "填写服务账号表单并生成公私钥", confirm: "核对后点击页面上的「确认」" },
     isLoggedIn: async (h) => {
       if (/login|id\d*\.cloud\.huawei\.com|portal\/loginAuth/i.test(location.href)) return false;
       for (const doc of h.docs()) {
@@ -67,70 +71,79 @@ const APKGO_RECIPES = [
       }
       return true;
     },
-    // AGC 正文在同源 iframe 里，Element UI：.el-dialog / .el-radio / .el-checkbox / .el-button。
-    // 「一键获取密钥」按 flow 顺序跑；弹窗上的「确认」留给用户，之后抓下载 → 自动保存验证。
     flow: ["open-create"],
     actions: {
       "open-create": async (h) => {
         if (/login|id\d*\.cloud\.huawei\.com|portal\/loginAuth/i.test(location.href)) {
           throw new Error("检测到您尚未登录华为开发者账号，请先完成登录后再获取密钥。");
         }
-        let dlg = h.byText(".el-dialog", /创建Service Account/);
-        if (!dlg) {
-          const btn = h.byText("button", /^创建$/);
-          if (!btn) throw new Error("没找到「创建」按钮。请确认停在「用户与访问 → API密钥 → Connect API」的 Service Account 页签。");
-          btn.click();
-          dlg = await h.waitFor(() => h.byText(".el-dialog", /创建Service Account/), 4000);
-          if (!dlg) throw new Error("点了「创建」但没等到弹窗，请手动点一次再试。");
+        const getForm = () => h.byText("app-service-account-add", /创建服务账号凭证/);
+        let form = getForm();
+        if (!form) {
+          const tab = await h.waitFor(() => h.byText('[role="tab"]', /^开发者级凭证$/), 10000);
+          if (!tab) throw new Error("没找到「开发者级凭证」页签，请确认位于新版「凭证」页面。");
+          if (tab.getAttribute("aria-selected") !== "true") tab.click();
+          const create = await h.waitFor(() => {
+            const selected = h.byText('[role="tab"]', /^开发者级凭证$/);
+            if (!selected || selected.getAttribute("aria-selected") !== "true") return null;
+            const title = h.byText("h1,h2,h3,h4,div,span", /^服务账号凭证$/);
+            for (let section = title && title.parentElement; section && section.tagName.toLowerCase() !== "body"; section = section.parentElement) {
+              const buttons = [...section.querySelectorAll("button")].filter((el) => /^创建$/.test(h.textOf(el)) && el.getClientRects().length);
+              if (buttons.length > 1) throw new Error("服务账号区域有多个「创建」按钮，请手动进入服务账号创建表单。");
+              if (buttons.length === 1) return buttons[0];
+            }
+            return null;
+          }, 10000);
+          if (!create) throw new Error("没找到开发者级「服务账号凭证」的创建按钮，请确认账号权限。");
+          create.click();
+          form = await h.waitFor(getForm, 10000);
+          if (!form) throw new Error("没等到「创建服务账号凭证」表单，请手动进入后再试。");
         }
-        const name = dlg.querySelector('input.el-input__inner[type="text"]');
-        if (name && !name.value) h.setInput(name, "apkgo");
-        // 单选/多选按「去掉空白、不分大小写」的文字找。AGC 的角色一栏不是标准
-        // .el-checkbox（实登时 querySelectorAll 为空），所以退一步：找文字正好是
-        // 「APP管理员」的元素，点它最近的可点击容器；勾没勾上从 input / aria-checked /
-        // class 三种信号判断，没信号就假定没勾、点一次并提醒核对。
-        const norm = (t) => String(t || "").replace(/\s+/g, "").toLowerCase();
-        const findText = (want) => {
-          const els = [...dlg.querySelectorAll("*")].filter((el) => el.children.length <= 2 && norm(h.textOf(el)) === want && el.getClientRects().length);
-          const el = els[els.length - 1];
+        // 新版自定义角色 label 没有 input，以 Ant 的 checked 标记读取实际状态。
+        const checked = (el) => {
           if (!el) return null;
-          // 先找语义明确的容器（label / role / el-*），再退到类名含 checkbox/radio 的祖先，最后用父元素。
-          const c1 = el.closest('label, [role="checkbox"], [role="radio"], .el-checkbox, .el-radio');
-          if (c1) return c1;
-          const c2 = el.parentElement && el.parentElement.closest('[class*="checkbox"], [class*="radio"], li');
-          return c2 || el.parentElement || el;
+          const input = el.querySelector('input[type="checkbox"], input[type="radio"]');
+          if (input) return input.checked;
+          const aria = el.hasAttribute("aria-checked") ? el : el.querySelector("[aria-checked]");
+          if (aria) return aria.getAttribute("aria-checked") === "true";
+          const marker = el.querySelector(".ant-checkbox, .ant-radio");
+          return marker ? (marker.classList.contains("ant-checkbox-checked") || marker.classList.contains("ant-radio-checked")) : null;
         };
-        const state = (t) => {
-          const inp = t.querySelector('input[type="checkbox"], input[type="radio"]');
-          if (inp) return inp.checked;
-          const ariaEl = t.hasAttribute("aria-checked") ? t : t.querySelector("[aria-checked]");
-          if (ariaEl) return ariaEl.getAttribute("aria-checked") === "true";
-          if (/is-checked|checked|is-active|active|selected/i.test(t.className)) return true;
-          if (t.querySelector('[class*="is-checked"], [class*="checked"], [class*="active"], [class*="selected"]')) return true;
-          return null; // 看不出来
-        };
-        const notes = [];
-        // 角色一栏（.el-checkbox-group）是弹窗打开后异步加载的，等它渲染出来再勾。
-        await h.waitFor(() => [...dlg.querySelectorAll(".el-checkbox")].some((x) => norm(h.textOf(x)) === "app管理员"), 6000);
-        const radio = findText("开发者级");
-        if (radio && state(radio) !== true) radio.click();
-        const cb = findText("app管理员");
-        if (!cb) {
-          const roleLabel = [...dlg.querySelectorAll("*")].find((el) => el.children.length <= 2 && /^角色/.test(h.textOf(el)));
-          const box = roleLabel ? (roleLabel.closest(".el-form-item") || roleLabel.parentElement) : null;
-          const opts = box ? [...box.querySelectorAll("*")].filter((el) => !el.children.length && h.textOf(el) && h.textOf(el).length <= 8 && !/^角色/.test(h.textOf(el))).map((el) => h.textOf(el)) : [];
-          notes.push("没找到「APP管理员」角色，请在弹窗里手动勾上" + (opts.length ? "（看到的选项：" + [...new Set(opts)].join("、") + "）" : ""));
-        } else {
-          const before = state(cb);
-          if (before !== true) { cb.click(); await h.wait(150); }
-          const after = state(cb);
-          if (after === false) { const inp = cb.querySelector("input"); if (inp) { inp.click(); await h.wait(100); } }
-          if (state(cb) !== true) notes.push("已点「APP管理员」，请在弹窗里确认它勾上了");
+        const level = h.byText('label,[role="radio"]', /^开发者级凭证\s*$/, form);
+        if (checked(level) !== true) throw new Error("无法确认开发者级凭证，请返回「开发者级凭证」页签重新创建。");
+        const admin = await h.waitFor(() => h.byText('label,[role="checkbox"]', /^APP管理员\s*$/, form), 10000);
+        const roles = [...form.querySelectorAll('label.checkbox,[role="checkbox"]')];
+        if (roles.some((el) => el !== admin && checked(el) !== false)) throw new Error("其他角色已选中或状态不可确认，请在表单中核对角色后再试。");
+        if (checked(admin) === null) throw new Error("无法确认「APP管理员」角色的勾选状态，请手动核对。");
+        if (!checked(admin)) {
+          admin.click();
+          if (!(await h.waitFor(() => checked(admin) === true, 10000))) throw new Error("未能勾选「APP管理员」，请手动核对。");
         }
-        const ok = h.byText("button", /^确认$/, dlg);
-        if (!ok) throw new Error("弹窗里没找到「确认」按钮。");
+        const name = form.querySelector('input[placeholder="请输入名称"]');
+        const description = form.querySelector('input[placeholder="请输入描述"]');
+        const publicKey = form.querySelector('textarea[placeholder="请输入公钥或点击下方按钮生成公私钥"]');
+        if (!name || !description || !publicKey) throw new Error("服务账号表单字段发生变化，请手动填写或选取完整 JSON 文件。");
+        if (!name.value.trim()) h.setInput(name, "apkgo");
+        if (!description.value.trim()) h.setInput(description, "用于配置平台的华为渠道 API 调用");
+        const generated = huaweiGeneratedPublicKeys.get(form.ownerDocument);
+        const sameForm = generated && generated.form === form;
+        const value = publicKey.value.trim();
+        if ((sameForm && value !== generated.key) || (value && !sameForm)) {
+          throw new Error("已有公钥的生成来源无法确认或公钥已被修改，请返回新建空白表单，或手动导入包含私钥的完整 JSON。");
+        }
+        if (!(await h.ensureHook())) throw new Error("下载捕获尚未就绪，请重试；暂不生成公私钥。");
+        if (!sameForm) {
+          const generate = h.byText("button", /^生成公私钥$/, form);
+          if (!generate) throw new Error("没找到「生成公私钥」按钮，请确认当前表单。");
+          generate.click();
+          const key = await h.waitFor(() => getForm() === form && publicKey.value.trim(), 10000);
+          if (!key) throw new Error("生成公私钥后未得到公钥，请核对页面提示，不要直接确认创建。");
+          huaweiGeneratedPublicKeys.set(form.ownerDocument, { form, key });
+        }
+        const ok = h.byText("button", /^确认$/, form);
+        if (!ok) throw new Error("表单里没找到「确认」按钮。");
         h.highlight(ok);
-        return (notes.length ? "⚠️ " + notes.join("；") + "。然后" : "已填好：名称 apkgo、类型「开发者级」、角色「APP管理员」。请核对后") + "点绿框里的「确认」，剩下的交给我：抓到下载的 JSON 就自动保存并验证。";
+        return "已准备开发者级服务账号、APP管理员角色与公私钥。请核对华为账号和保存主体后点击绿框里的「确认」，下载的 JSON 将自动保存并验证。";
       },
     },
   },

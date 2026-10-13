@@ -35,6 +35,7 @@ test("华为：validate 拦下坏 JSON 与缺字段，finalize 拆成四个字�
   assert.match(h.validate({ serviceAccountJson: "not json" }), /不是合法的 JSON/);
   assert.match(h.validate({ serviceAccountJson: JSON.stringify({ key_id: "k" }) }), /缺少 key_id/);
   assert.equal(h.validate({}), ""); // 还没选文件时交给「还差」提示
+  assert.match(h.validate({ serviceAccountJson: JSON.stringify({ key_id: "k", sub_account: "sa" }) }), /private_key.*生成公私钥/);
   const pem = "-----BEGIN PRIVATE KEY-----\nX\n-----END PRIVATE KEY-----";
   const snake = JSON.stringify({ key_id: "k1", private_key: pem, sub_account: "317654321", project_id: "p1", name: "apkgo", roles: ["app"] });
   assert.deepEqual(h.finalize({ serviceAccountJson: snake }), { keyId: "k1", privateKey: pem, subAccount: "317654321", projectId: "p1" });
