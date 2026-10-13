@@ -31,7 +31,7 @@ async function shadow(page) {
     const { nodeId: hostId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector: "#apkgo-assistant-root" });
     const { node } = await cdp.send("DOM.describeNode", { nodeId: hostId, pierce: true });
     const { object } = await cdp.send("DOM.resolveNode", { backendNodeId: node.shadowRoots[0].backendNodeId });
-    const r = await cdp.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: `function(...a){ return (${fnSrc})(this, ...a); }`, arguments: args.map((v) => ({ value: v })), returnByValue: true, awaitPromise: true });
+    const r = await cdp.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: `function(...a){ return (${fnSrc})(this, ...a); }`, arguments: args.map((v) => ({ value: v })), returnByValue: true, awaitPromise: true, userGesture: true });
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.text + " " + JSON.stringify(r.exceptionDetails.exception));
     return r.result.value;
   };
@@ -134,6 +134,43 @@ try {
       : path === "/consumer/cn/consoleIframe/api/addServiceAccountKeys/0/developer/0" ? "hdc-service-account.html" : null;
     return file ? route.fulfill(html(fixture(file))) : route.abort();
   });
+  const huaweiErrors = [];
+  async function huaweiCase(name, scenario, check) {
+    const page = await ctx.newPage();
+    try {
+      await page.goto(HDC_ENTRY.replace("index.html#", `index.html?case=${scenario}#`));
+      await page.waitForSelector("#apkgo-assistant-root", { state: "attached", timeout: 10000 });
+      const sh = await shadow(page);
+      const inner = page.frameLocator("iframe");
+      const until = async (fn, message) => {
+        const end = Date.now() + 15000;
+        while (Date.now() < end) { if (await fn()) return; await page.waitForTimeout(100); }
+        throw new Error(message);
+      };
+      const prepare = async () => {
+        await openPanel(sh);
+        await until(async () => !(await oneClickDisabled(sh)), "华为一键按钮一直不可用");
+        must(await oneClick(sh), "无法启动华为准备");
+        await inner.locator("app-service-account-add").waitFor({ timeout: 15000 });
+      };
+      await check({ page, sh, inner, prepare, until });
+      step(name, { passed: true });
+    } catch (e) {
+      huaweiErrors.push(`${name}: ${e.message || e}`);
+      console.error("HUAWEI_CASE_FAIL", name, String(e));
+    } finally { await page.close(); }
+  }
+  // 尚未从伪平台开启过华为渠道，此临时浏览器的 owner:huawei 为空。
+  await huaweiCase("huawei no owner or collection intent", "normal", async ({ page, sh, inner }) => {
+    await inner.locator("#developer-tab").waitFor();
+    await page.waitForTimeout(300);
+    must(!(await inner.locator("body").evaluate((body) => !!body.ownerDocument.defaultView.__apkgoDownloadHook)), "未打开助手时不能自动安装采集钩子");
+    await openPanel(sh);
+    must(await oneClickDisabled(sh), "没有主体时一键必须禁用");
+    must(/没有主体上下文/.test(await panelText(sh)), "没有主体时应提示回配置平台");
+    must((await page.evaluate(() => window.__huawei.confirm)) === 0, "没有主体时不能确认");
+  });
+
   step("open-console huawei", { url: await openFromPlatform(platform, "huawei") });
   for (const mode of ["navigate", "replace"]) {
     const agc = await ctx.newPage();
@@ -145,7 +182,7 @@ try {
     must(await oneClick(sh2), "华为一键按钮不可点");
     const inner = agc.frameLocator("iframe");
     await inner.locator("app-service-account-add").waitFor({ timeout: 15000 });
-    await agc.waitForFunction(() => window.__huawei.generate === 1, null, { timeout: 15000 });
+    await agc.waitForFunction(() => window.__huawei.generate === 1, null, { timeout: 15000 }).catch(async (e) => { throw new Error(`${e.message}; Huawei preparation: ${await msgText(sh2)}; counts: ${JSON.stringify(await agc.evaluate(() => window.__huawei))}`); });
     await agc.waitForFunction(() => document.querySelector('iframe').contentDocument.querySelector('textarea').value === 'FAKE_PUBLIC_KEY');
     const prepared = await agc.evaluate(() => window.__huawei);
     must(prepared.confirm === 0 && prepared.wrongCreate === 0 && prepared.hookReady, "华为准备不能确认或点错区域，生成前捕获必须就绪");
@@ -187,6 +224,108 @@ try {
   } finally {
     await sw.evaluate(() => { chrome.scripting.executeScript = globalThis.__savedExecuteScript; delete globalThis.__savedExecuteScript; });
   }
+
+  await huaweiCase("huawei missing private key rejected", "missing-private", async ({ page, sh, inner, prepare, until }) => {
+    const before = (await received()).length;
+    await prepare();
+    await until(() => inner.locator("textarea").inputValue().then(Boolean), "公钥未生成");
+    await inner.locator("#confirm").click();
+    await until(async () => /private_key.*生成公私钥/.test(await msgText(sh)), "缺私钥未显示生成提示");
+    must((await received()).length === before, "缺私钥 JSON 不能保存");
+    must(await sh(`(sr) => sr.querySelector('details.manual').open`), "缺私钥时应展开手动恢复入口");
+    must(!(await oneClickDisabled(sh)), "缺私钥不能停留在正在保存状态");
+    const draft = await sw.evaluate(async () => (await chrome.storage.session.get('draft:huawei'))['draft:huawei']);
+    must(!!draft.config.serviceAccountJson, "非法下载应保留给用户核对");
+    await sw.evaluate(async () => chrome.storage.session.remove('draft:huawei'));
+  });
+
+  let rejectNext = true;
+  const savePattern = /^http:\/\/localhost:9090\/api\/product\/owner-open-platform-config\/(?:add|edit)$/;
+  await ctx.route(savePattern, (route) => {
+    if (route.request().postDataJSON().channel === "huawei" && rejectNext) {
+      rejectNext = false;
+      return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: 400, msg: "模拟保存失败", data: null }) });
+    }
+    return route.continue();
+  });
+  try {
+    await huaweiCase("huawei save retry without new credential", "normal", async ({ page, sh, inner, prepare, until }) => {
+      await prepare();
+      await until(() => inner.locator("textarea").inputValue().then(Boolean), "公钥未生成");
+      await inner.locator("#confirm").click();
+      await until(async () => /模拟保存失败/.test(await msgText(sh)), "未显示保存失败");
+      const draft = await sw.evaluate(async () => (await chrome.storage.session.get('draft:huawei'))['draft:huawei']);
+      must(!!draft.config.serviceAccountJson, "保存失败应保留文件草稿");
+      must(await sh(`(sr) => sr.querySelector('details.manual').open`), "保存失败应展开手动恢复");
+      const beforeRetry = (await received()).length;
+      await sh(`(sr) => sr.querySelector('[data-act="save"]').click()`);
+      await until(async () => /在线验证通过/.test(await msgText(sh)), "重试保存未成功");
+      must((await received()).length === beforeRetry + 1, "重试应恰好提交一次");
+      const counts = await page.evaluate(() => window.__huawei);
+      must(counts.generate === 1 && counts.confirm === 1, "重试不能再生成或创建凭据");
+      const json = JSON.stringify({ key_id: 'k1', sub_account: '317654321', private_key: '-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----' });
+      for (let i = 0; i < 3; i++) await inner.locator("body").evaluate((body, text) => body.ownerDocument.defaultView.postMessage({ source: "apkgo-assistant-hook", type: "download", name: "duplicate.json", mime: "application/json", text }, "*"), json);
+      await page.waitForTimeout(300);
+      must((await received()).length === beforeRetry + 1, "重复下载不能再次保存");
+      const after = await sw.evaluate(async () => (await chrome.storage.session.get('draft:huawei'))['draft:huawei']);
+      must(after === undefined, "已保存的下载不能重新填入草稿");
+    });
+  } finally { await ctx.unroute(savePattern); }
+
+  await huaweiCase("huawei manual JSON fallback and dedup", "normal", async ({ page, sh, inner, until }) => {
+    await openPanel(sh);
+    await sh(`(sr) => { sr.querySelector('details.manual').open = true; }`);
+    const json = JSON.stringify({ key_id: 'manual-k', sub_account: 'manual-sa', private_key: '-----BEGIN PRIVATE KEY-----\nMANUAL\n-----END PRIVATE KEY-----' });
+    const chooserPromise = page.waitForEvent("filechooser", { timeout: 5000 });
+    await sh(`(sr) => sr.querySelector('input[data-file="serviceAccountJson"]').click()`);
+    const chooser = await chooserPromise;
+    await chooser.setFiles({ name: "manual.json", mimeType: "application/json", buffer: Buffer.from(json) });
+    await until(async () => {
+      const d = await sw.evaluate(async () => (await chrome.storage.session.get('draft:huawei'))['draft:huawei']);
+      return d?.config.serviceAccountJson === json;
+    }, "手动文件未进入草稿");
+    const before = (await received()).length;
+    await sh(`(sr) => sr.querySelector('[data-act="save"]').click()`);
+    await until(async () => (await received()).length === before + 1, "手动文件未保存成功");
+    const receivedManual = await received();
+    must(receivedManual.length === before + 1 && receivedManual.at(-1).body.configInfo.keyId === "manual-k", "手动导入未正确保存");
+    must((await page.evaluate(() => window.__huawei.generate + window.__huawei.confirm)) === 0, "手动导入不能创建凭据");
+    await until(async () => /在线验证通过/.test(await msgText(sh)), "手动保存成功应显示结果");
+    await inner.locator("body").evaluate((body, text) => body.ownerDocument.defaultView.postMessage({ source: "apkgo-assistant-hook", type: "download", name: "manual.json", mime: "application/json", text }, "*"), json);
+    await page.waitForTimeout(300);
+    must((await received()).length === before + 1, "手动导入后重复下载不能保存");
+    const draft = await sw.evaluate(async () => (await chrome.storage.session.get('draft:huawei'))['draft:huawei']);
+    must(draft === undefined, "手动保存成功后重复下载不能恢复草稿");
+  });
+
+  for (const [scenario, error] of [["unknown-public", /公钥/], ["extra-role", /角色/], ["unknown-role", /角色|APP管理员/], ["generation-failed", /公钥|生成/]]) {
+    await huaweiCase(`huawei stop ${scenario}`, scenario, async ({ page, sh, prepare, until }) => {
+      const before = (await received()).length;
+      await prepare();
+      await until(async () => error.test(await msgText(sh)), "失败未显示对应提示");
+      const counts = await page.evaluate(() => window.__huawei);
+      must(counts.confirm === 0 && counts.wrongCreate === 0 && (await received()).length === before, "非法状态不能确认或保存");
+      if (scenario !== "generation-failed") must(counts.generate === 0, "非法已有公钥或角色不能生成");
+    });
+  }
+  await huaweiCase("huawei changed public key rejected", "normal", async ({ page, sh, inner, prepare, until }) => {
+    await prepare(); await until(() => inner.locator("textarea").inputValue().then(Boolean), "公钥未生成");
+    await inner.locator("textarea").fill("CHANGED_PUBLIC_KEY");
+    await openPanel(sh);
+    await sh(`(sr) => { sr.querySelector('details.manual').open = true; sr.querySelector('[data-action="open-create"]').click(); }`);
+    await until(async () => /公钥.*修改/.test(await msgText(sh)), "修改公钥后未停止准备");
+    const counts = await page.evaluate(() => window.__huawei);
+    must(counts.generate === 1 && counts.confirm === 0, "修改公钥后不能重生成或确认");
+    // 同一文档的 SPA 新建视图：替换表单根节点，不能复用旧表单的生成记录。
+    await inner.locator("app-service-account-add").evaluate((old) => {
+      const next = old.ownerDocument.createElement("app-service-account-add");
+      next.append(...old.childNodes); old.replaceWith(next); next.querySelector("textarea").value = "";
+    });
+    await sh(`(sr) => sr.querySelector('[data-action="open-create"]').click()`);
+    await until(async () => (await page.evaluate(() => window.__huawei.generate)) === 2, "新的空白表单应允许重新生成");
+    must((await page.evaluate(() => window.__huawei.confirm)) === 0, "新的表单仍不能自动确认");
+  });
+  if (huaweiErrors.length) throw new Error(huaweiErrors.join("\n"));
 
   // 8. 应用宝：单段——本页读 access_secret + 登录信息取 userId → 直接保存（后端不验活）
   const CORS = { "access-control-allow-origin": "https://app.open.qq.com", "access-control-allow-credentials": "true", "access-control-allow-headers": "*", "access-control-allow-methods": "POST,GET,OPTIONS" };

@@ -700,6 +700,7 @@
   const huaweiHookBindings = new Map();
   let huaweiHookTask = null;
   let huaweiFrameObserver = null;
+  let huaweiWatchEnabled = false;
   const huaweiFrames = new Set();
   async function ensureHook() {
     if (!recipe.fields.some((f) => f.capture)) return true;
@@ -713,6 +714,8 @@
       }
       return hookReady;
     }
+    huaweiWatchEnabled = true;
+    startHuaweiHookWatch();
     if (!huaweiHookTask) {
       huaweiHookTask = (async () => {
         // 注入过程中 iframe 可能换文档；最多再核对一次，不把旧文档的成功当成新表单就绪。
@@ -767,9 +770,8 @@
     huaweiHookBindings.clear();
   }
   if (recipe.id === "huawei") {
-    startHuaweiHookWatch();
     window.addEventListener("pagehide", stopHuaweiHookWatch);
-    window.addEventListener("pageshow", (e) => { if (e.persisted) startHuaweiHookWatch(); });
+    window.addEventListener("pageshow", (e) => { if (e.persisted && huaweiWatchEnabled) startHuaweiHookWatch(); });
   }
   function onHookMessage(e) {
     const d = e.data;
@@ -811,9 +813,14 @@
     if (missing.length) { result = { kind: "warn", html: "还差：" + missing.map((f) => esc(f.label)).join("、") }; return render(); }
     if (typeof recipe.validate === "function") {
       const bad = recipe.validate(draft.config);
-      if (bad) { result = { kind: "warn", html: esc(bad) }; return render(); }
+      if (bad) {
+        result = { kind: "warn", html: esc(bad) };
+        if (recipe.id === "huawei") { autoSave = false; manualOpen = true; setStage("error"); return; }
+        return render();
+      }
     }
-    busy = true; result = null; render();
+    busy = true; result = null;
+    if (recipe.id === "huawei" && stage === "idle") setStage("saving"); else render();
     let config = {};
     for (const f of recipe.fields) if (draft.config[f.key]) config[f.key] = draft.config[f.key];
     // finalize 把采集结果整理成配置平台要的 configInfo（华为拆 JSON、小米带公钥）；
@@ -827,6 +834,7 @@
         ? { kind: "ok", html: `已保存到配置平台，${esc(recipe.cn)}在线验证通过。${link}，或者继续采集下一家。` }
         : { kind: "ok", html: `已保存到配置平台。${esc(recipe.cn)}暂不支持在线验证，发布时会直接使用这组密钥。${link}` };
       if (capturedFp) lastSaved = capturedFp;
+      else if (recipe.id === "huawei" && draft.config.serviceAccountJson) lastSaved = fingerprint(draft.config.serviceAccountJson);
       await clearDraft();
       launch.classList.remove("has-draft");
       if (stage !== "idle") { stage = "done"; }
