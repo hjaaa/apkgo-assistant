@@ -1,0 +1,15 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>HUAWEI Developer</title>
+<style>body{font:14px sans-serif;margin:0}.header{padding:18px;border-bottom:1px solid #ddd}.wrap{display:flex}aside{padding:20px;width:180px}iframe{border:0;flex:1;height:85vh}</style></head>
+<body><div class="header">HarmonyOS 开发者中心 <span class="user-info">虚构测试账号</span></div><div class="wrap"><aside>ID、证书和Profile<br>凭证</aside><iframe id="mainIframeView"></iframe></div>
+<script>
+const options = new URLSearchParams(location.search);
+window.__huawei = { generate: 0, confirm: 0, wrongCreate: 0, hookReady: false };
+window.__navigate = (path) => {
+  let frame = document.getElementById('mainIframeView');
+  if (options.get('mode') === 'replace' && path.includes('addServiceAccountKeys')) {
+    const next = document.createElement('iframe'); next.id = frame.id; frame.replaceWith(next); frame = next;
+  }
+  frame.src = path + '?' + options;
+};
+window.__navigate('/consumer/cn/consoleIframe/api/credentials/1');
+</script></body></html>

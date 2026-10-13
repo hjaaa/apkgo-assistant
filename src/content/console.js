@@ -604,7 +604,7 @@
     busyAction = id; result = null; render();
     try {
       await ensureHook();
-      const msg = await fn({ docs, byText, setInput, highlight, wait, waitFor, draft, textOf, responses, storage, deepFind, scanText, reloadAndResume, requestNav, onConsolePage, ...extra });
+      const msg = await fn({ docs, byText, setInput, highlight, wait, waitFor, draft, textOf, responses, storage, deepFind, scanText, reloadAndResume, requestNav, onConsolePage, ensureHook, ...extra });
       result = { kind: "ok", html: esc(msg || "已完成。") };
       busyAction = ""; render();
       if (!autoSave) { // 单独点「帮我点」时也让位；一键流程由 oneClick 统一处理
@@ -697,16 +697,79 @@
   // ---- 下载自动抓取：页面一下载密钥文件，直接填进对应的文件字段 ----
   let hookReady = false;
   const hookedWindows = new WeakSet();
+  const huaweiHookBindings = new Map();
+  let huaweiHookTask = null;
+  let huaweiFrameObserver = null;
+  const huaweiFrames = new Set();
   async function ensureHook() {
-    if (!recipe.fields.some((f) => f.capture)) return;
-    // 页面里的钩子是幂等的（挂过就跳过），每次都注入一遍，好把后来才加载的 iframe 也覆盖到。
-    const r = await APKGO.send({ type: "injectHook" }); hookReady = !!r.ok;
-    for (const d of docs()) {
-      const w = d.defaultView;
-      if (!w || hookedWindows.has(w)) continue;
-      hookedWindows.add(w);
-      w.addEventListener("message", onHookMessage);
+    if (!recipe.fields.some((f) => f.capture)) return true;
+    if (recipe.id !== "huawei") {
+      const r = await APKGO.send({ type: "injectHook" }); hookReady = !!r.ok;
+      for (const d of docs()) {
+        const w = d.defaultView;
+        if (!w || hookedWindows.has(w)) continue;
+        hookedWindows.add(w);
+        w.addEventListener("message", onHookMessage);
+      }
+      return hookReady;
     }
+    if (!huaweiHookTask) {
+      huaweiHookTask = (async () => {
+        // 注入过程中 iframe 可能换文档；最多再核对一次，不把旧文档的成功当成新表单就绪。
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const before = docs();
+          const r = await APKGO.send({ type: "injectHook" });
+          hookReady = !!r.ok;
+          if (!hookReady) return false;
+          const current = docs();
+          if (before.length !== current.length || before.some((d, i) => d !== current[i])) continue;
+          for (const [d, w] of huaweiHookBindings) {
+            if (!current.includes(d)) { try { w.removeEventListener("message", onHookMessage); } catch { /* 旧文档可能已经销毁 */ } huaweiHookBindings.delete(d); }
+          }
+          for (const d of current) {
+            const w = d.defaultView;
+            if (!w) return false;
+            if (!huaweiHookBindings.has(d)) { w.addEventListener("message", onHookMessage); huaweiHookBindings.set(d, w); }
+          }
+          return true;
+        }
+        hookReady = false;
+        return false;
+      })().finally(() => { huaweiHookTask = null; });
+    }
+    return huaweiHookTask;
+  }
+  function refreshHuaweiHook() { ensureHook().catch(() => { hookReady = false; }); }
+  function watchHuaweiFrames() {
+    const current = [...document.querySelectorAll("iframe")];
+    for (const frame of huaweiFrames) {
+      if (!current.includes(frame)) { frame.removeEventListener("load", refreshHuaweiHook); huaweiFrames.delete(frame); }
+    }
+    for (const frame of current) {
+      if (huaweiFrames.has(frame)) continue;
+      huaweiFrames.add(frame);
+      frame.addEventListener("load", refreshHuaweiHook);
+      refreshHuaweiHook();
+    }
+  }
+  function startHuaweiHookWatch() {
+    if (recipe.id !== "huawei" || huaweiFrameObserver) return;
+    huaweiFrameObserver = new MutationObserver(watchHuaweiFrames);
+    huaweiFrameObserver.observe(document.documentElement, { childList: true, subtree: true });
+    watchHuaweiFrames();
+  }
+  function stopHuaweiHookWatch() {
+    if (huaweiFrameObserver) huaweiFrameObserver.disconnect();
+    huaweiFrameObserver = null;
+    for (const frame of huaweiFrames) frame.removeEventListener("load", refreshHuaweiHook);
+    huaweiFrames.clear();
+    for (const w of huaweiHookBindings.values()) { try { w.removeEventListener("message", onHookMessage); } catch { /* 页面已关闭 */ } }
+    huaweiHookBindings.clear();
+  }
+  if (recipe.id === "huawei") {
+    startHuaweiHookWatch();
+    window.addEventListener("pagehide", stopHuaweiHookWatch);
+    window.addEventListener("pageshow", (e) => { if (e.persisted) startHuaweiHookWatch(); });
   }
   function onHookMessage(e) {
     const d = e.data;

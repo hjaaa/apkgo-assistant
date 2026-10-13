@@ -1,7 +1,7 @@
 # 伪配置平台：一个模拟「密钥配置」弹窗协议的页面 + token 刷新端点 + 主体开放平台配置的 list/get/add/edit。
 # 响应形状、错误文案、唯一键规则都照 dream-product 与网关的口径。
 import json, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>fake platform</title></head><body>
@@ -105,4 +105,4 @@ class H(BaseHTTPRequestHandler):
         return self._ok(True)
 
 
-HTTPServer(("127.0.0.1", int(sys.argv[1]) if len(sys.argv) > 1 else 9090), H).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1]) if len(sys.argv) > 1 else 9090), H).serve_forever()

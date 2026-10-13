@@ -125,37 +125,68 @@ try {
   must(recv.length === 3 && recv[2].mode === "edit" && recv[2].auth === "Bearer at-2", "过期后应刷新并用新 token 重试：" + JSON.stringify(recv[2]));
   must(/在线验证通过/.test(msg), "刷新后应保存成功：" + msg);
 
-  // 7. 华为：「一键」打开并填好创建弹窗 → 用户点「确认」→ 下载的 JSON 自动进面板 → 拆成四个字段保存
-  await ctx.route("https://developer.huawei.com/**", (route) => route.fulfill(html(route.request().url().includes("/cdp/") ? fixture("agc-inner.html") : fixture("agc-outer.html"))));
-  step("open-console huawei", { url: await openFromPlatform(platform, "huawei") });
-  const agc = await ctx.newPage();
-  await agc.goto("https://developer.huawei.com/consumer/cn/service/josp/agc/index.html#/ups/9249519184595983326");
-  await agc.waitForSelector("#apkgo-assistant-root", { state: "attached", timeout: 10000 });
-  await agc.frameLocator("iframe").locator("text=Service Account是更安全的凭据").waitFor({ timeout: 10000 });
-  await agc.waitForTimeout(600);
-  const sh2 = await shadow(agc);
-  await openPanel(sh2); await agc.waitForTimeout(400);
-  must(await oneClick(sh2), "华为一键按钮不可点");
-  await agc.waitForTimeout(1200);
-  const inner = agc.frameLocator("iframe");
-  step("huawei open-create", {
-    msg: await msgText(sh2),
-    dialogVisible: await inner.locator(".el-dialog__wrapper.on").count(),
-    appName: await inner.locator("input.el-input__inner").inputValue(),
-    devChecked: await inner.locator('input[name=t][value=dev]').isChecked(),
-    appAdminChecked: await inner.locator('.el-checkbox__original[value=app]').isChecked(),
+  // 7. 华为：新版开发者级独立表单；同一 iframe 导航与 iframe 替换均须捕获。
+  const HDC_ENTRY = "https://developer.huawei.com/consumer/cn/hdc-console/index.html#/home/101653523124950083";
+  await ctx.route("https://developer.huawei.com/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const file = path === "/consumer/cn/hdc-console/index.html" ? "hdc-outer.html"
+      : /^\/consumer\/cn\/consoleIframe\/api\/credentials\/[01]$/.test(path) ? "hdc-credentials.html"
+      : path === "/consumer/cn/consoleIframe/api/addServiceAccountKeys/0/developer/0" ? "hdc-service-account.html" : null;
+    return file ? route.fulfill(html(fixture(file))) : route.abort();
   });
-  await agc.screenshot({ path: path.join(SHOTS, "05-huawei-filled.png") });
-  const dl = agc.waitForEvent("download", { timeout: 5000 }).then((d) => ({ file: d.suggestedFilename() }), () => ({ file: null }));
-  await inner.locator(".el-dialog__footer button").first().click();
-  step("huawei browser download event", await dl);
-  await agc.waitForTimeout(3000); // 抓到下载 → 自动保存
-  recv = await received();
-  const hw = recv[recv.length - 1];
-  step("huawei saved", { msg: await msgText(sh2), mode: hw.mode, channel: hw.body.channel, keys: Object.keys(hw.body.configInfo) });
-  must(hw.body.channel === "huawei" && hw.mode === "add", "华为应新增保存");
-  must(hw.body.configInfo.keyId === "k1" && hw.body.configInfo.subAccount === "317654321" && /BEGIN PRIVATE KEY/.test(hw.body.configInfo.privateKey) && hw.body.configInfo.projectId === "", "华为 JSON 没有拆成四个字段：" + JSON.stringify(hw.body.configInfo));
-  await agc.screenshot({ path: path.join(SHOTS, "06-huawei-captured.png") });
+  step("open-console huawei", { url: await openFromPlatform(platform, "huawei") });
+  for (const mode of ["navigate", "replace"]) {
+    const agc = await ctx.newPage();
+    await agc.goto(HDC_ENTRY.replace("index.html#", `index.html?mode=${mode}#`));
+    await agc.waitForSelector("#apkgo-assistant-root", { state: "attached", timeout: 10000 });
+    const sh2 = await shadow(agc);
+    await openPanel(sh2);
+    const beforeHw = (await received()).length;
+    must(await oneClick(sh2), "华为一键按钮不可点");
+    const inner = agc.frameLocator("iframe");
+    await inner.locator("app-service-account-add").waitFor({ timeout: 15000 });
+    await agc.waitForFunction(() => window.__huawei.generate === 1, null, { timeout: 15000 });
+    await agc.waitForFunction(() => document.querySelector('iframe').contentDocument.querySelector('textarea').value === 'FAKE_PUBLIC_KEY');
+    const prepared = await agc.evaluate(() => window.__huawei);
+    must(prepared.confirm === 0 && prepared.wrongCreate === 0 && prepared.hookReady, "华为准备不能确认或点错区域，生成前捕获必须就绪");
+    must((await received()).length === beforeHw, "用户确认前不能向配置平台保存");
+    must(await inner.locator('input[placeholder="请输入名称"]').inputValue() === "apkgo", "名称未填写");
+    await agc.screenshot({ path: path.join(SHOTS, `05-huawei-${mode}-filled.png`) });
+    const dl = agc.waitForEvent("download", { timeout: 10000 });
+    await inner.locator("#confirm").click();
+    step("huawei browser download", { mode, file: (await dl).suggestedFilename() });
+    await agc.waitForTimeout(1500);
+    recv = await received();
+    const hw = recv[recv.length - 1];
+    must(recv.length === beforeHw + 1 && hw.body.channel === "huawei" && hw.body.owner === OWNER, "华为应恰保存一条到目标主体");
+    must(hw.body.configInfo.keyId === "k1" && hw.body.configInfo.subAccount === "317654321" && /BEGIN PRIVATE KEY/.test(hw.body.configInfo.privateKey) && hw.body.configInfo.projectId === "", "华为 JSON 未正确拆分四字段");
+    must(/在线验证通过/.test(await msgText(sh2)), "华为保存后应显示成功");
+    const draft = await sw.evaluate(async () => (await chrome.storage.session.get('draft:huawei'))['draft:huawei']);
+    must(draft === undefined, "华为成功后应清除草稿");
+    step("huawei saved", { mode, action: hw.mode, channel: hw.body.channel });
+    await agc.screenshot({ path: path.join(SHOTS, `06-huawei-${mode}-captured.png`) });
+    await agc.close();
+  }
+
+  // 注入失败必须停在确认前，不能只依据公钥非空继续。
+  await sw.evaluate(() => { globalThis.__savedExecuteScript = chrome.scripting.executeScript; chrome.scripting.executeScript = async () => { throw new Error("Simulated injection failure"); }; });
+  try {
+    const failedHook = await ctx.newPage();
+    await failedHook.goto(HDC_ENTRY);
+    await failedHook.waitForSelector("#apkgo-assistant-root", { state: "attached", timeout: 10000 });
+    const failedShadow = await shadow(failedHook); await openPanel(failedShadow);
+    const beforeHook = (await received()).length;
+    must(await oneClick(failedShadow), "华为钩子失败测试无法启动");
+    await failedHook.frameLocator("iframe").locator("app-service-account-add").waitFor({ timeout: 15000 });
+    await failedHook.waitForTimeout(500);
+    const counts = await failedHook.evaluate(() => window.__huawei);
+    must(counts.generate === 0 && counts.confirm === 0 && (await received()).length === beforeHook, "捕获注入失败不能生成、确认或保存");
+    must(/下载捕获/.test(await msgText(failedShadow)), "注入失败应给出捕获提示");
+    step("huawei injection rejected", { stopped: true });
+    await failedHook.close();
+  } finally {
+    await sw.evaluate(() => { chrome.scripting.executeScript = globalThis.__savedExecuteScript; delete globalThis.__savedExecuteScript; });
+  }
 
   // 8. 应用宝：单段——本页读 access_secret + 登录信息取 userId → 直接保存（后端不验活）
   const CORS = { "access-control-allow-origin": "https://app.open.qq.com", "access-control-allow-credentials": "true", "access-control-allow-headers": "*", "access-control-allow-methods": "POST,GET,OPTIONS" };
