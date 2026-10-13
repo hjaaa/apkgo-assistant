@@ -298,6 +298,42 @@ try {
     must(draft === undefined, "手动保存成功后重复下载不能恢复草稿");
   });
 
+  // 手动保存去重必须绑定已提交的文件，不能误用等待期间新选的文件。
+  let releaseSave;
+  let saveSeen = false;
+  const saveGate = new Promise((resolve) => { releaseSave = resolve; });
+  await ctx.route(savePattern, async (route) => {
+    saveSeen = true; await saveGate; return route.continue();
+  });
+  try {
+    await huaweiCase("huawei manual fingerprint uses submitted JSON", "normal", async ({ page, sh, inner, until }) => {
+      await openPanel(sh);
+      const select = async (json, name) => {
+        await sh(`(sr) => { sr.querySelector('details.manual').open = true; }`);
+        const chooser = page.waitForEvent("filechooser", { timeout: 5000 });
+        await sh(`(sr) => sr.querySelector('input[data-file="serviceAccountJson"]').click()`);
+        await (await chooser).setFiles({ name, mimeType: "application/json", buffer: Buffer.from(json) });
+        await until(async () => (await sw.evaluate(async () => (await chrome.storage.session.get('draft:huawei'))['draft:huawei']))?.config.serviceAccountJson === json, "文件未进入草稿");
+      };
+      const a = JSON.stringify({ key_id: "submitted-a", sub_account: "sa", private_key: "FAKE_A" });
+      const b = JSON.stringify({ key_id: "not-yet-submitted-b", sub_account: "sa", private_key: "FAKE_B" });
+      await select(a, "a.json");
+      await sh(`(sr) => sr.querySelector('[data-act="save"]').click()`);
+      await until(() => saveSeen, "提交 A 未到达测试延迟点");
+      await select(b, "b.json");
+      releaseSave();
+      await until(async () => /在线验证通过/.test(await msgText(sh)), "A 未保存完成");
+      const beforeB = (await received()).length;
+      await inner.locator("body").evaluate((body, text) => body.ownerDocument.defaultView.postMessage({ source: "apkgo-assistant-hook", type: "download", name: "b.json", mime: "application/json", text }, "*"), b);
+      await page.waitForTimeout(300);
+      const draft = await sw.evaluate(async () => (await chrome.storage.session.get('draft:huawei'))['draft:huawei']);
+      must(draft?.config.serviceAccountJson === b, "不能把未提交的 B 误标为已经保存");
+      await sh(`(sr) => sr.querySelector('[data-act="save"]').click()`);
+      await until(async () => (await received()).length === beforeB + 1, "B 应能继续保存");
+      must((await received()).at(-1).body.configInfo.keyId === "not-yet-submitted-b", "应提交 B 的凭据");
+    });
+  } finally { releaseSave(); await ctx.unroute(savePattern); }
+
   for (const [scenario, error] of [["unknown-public", /公钥/], ["extra-role", /角色/], ["unknown-role", /角色|APP管理员/], ["generation-failed", /公钥|生成/]]) {
     await huaweiCase(`huawei stop ${scenario}`, scenario, async ({ page, sh, prepare, until }) => {
       const before = (await received()).length;

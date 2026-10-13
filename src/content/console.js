@@ -826,6 +826,7 @@
     // finalize 把采集结果整理成配置平台要的 configInfo（华为拆 JSON、小米带公钥）；
     // 第二个参数是完整草稿，actions 算出来的中间值从这里取。
     if (recipe.finalize) config = recipe.finalize(config, draft.config);
+    const submittedHuaweiJson = recipe.id === "huawei" ? draft.config.serviceAccountJson : "";
     const r = await APKGO.send({ type: "submit", store: recipe.id, owner, config });
     busy = false;
     if (r.ok) {
@@ -834,7 +835,7 @@
         ? { kind: "ok", html: `已保存到配置平台，${esc(recipe.cn)}在线验证通过。${link}，或者继续采集下一家。` }
         : { kind: "ok", html: `已保存到配置平台。${esc(recipe.cn)}暂不支持在线验证，发布时会直接使用这组密钥。${link}` };
       if (capturedFp) lastSaved = capturedFp;
-      else if (recipe.id === "huawei" && draft.config.serviceAccountJson) lastSaved = fingerprint(draft.config.serviceAccountJson);
+      else if (submittedHuaweiJson) lastSaved = fingerprint(submittedHuaweiJson);
       await clearDraft();
       launch.classList.remove("has-draft");
       if (stage !== "idle") { stage = "done"; }

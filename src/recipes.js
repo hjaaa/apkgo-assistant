@@ -105,7 +105,7 @@ const APKGO_RECIPES = [
           const input = el.querySelector('input[type="checkbox"], input[type="radio"]');
           if (input) return input.checked;
           const aria = el.hasAttribute("aria-checked") ? el : el.querySelector("[aria-checked]");
-          if (aria) return aria.getAttribute("aria-checked") === "true";
+          if (aria) { const value = aria.getAttribute("aria-checked"); return value === "true" ? true : value === "false" ? false : null; }
           const marker = el.querySelector(".ant-checkbox, .ant-radio");
           return marker ? (marker.classList.contains("ant-checkbox-checked") || marker.classList.contains("ant-radio-checked")) : null;
         };
@@ -125,21 +125,51 @@ const APKGO_RECIPES = [
         if (!name || !description || !publicKey) throw new Error("服务账号表单字段发生变化，请手动填写或选取完整 JSON 文件。");
         if (!name.value.trim()) h.setInput(name, "apkgo");
         if (!description.value.trim()) h.setInput(description, "用于配置平台的华为渠道 API 调用");
-        const generated = huaweiGeneratedPublicKeys.get(form.ownerDocument);
-        const sameForm = generated && generated.form === form;
-        const value = publicKey.value.trim();
-        if ((sameForm && value !== generated.key) || (value && !sameForm)) {
-          throw new Error("已有公钥的生成来源无法确认或公钥已被修改，请返回新建空白表单，或手动导入包含私钥的完整 JSON。");
-        }
+        const verifyForm = () => {
+          if (getForm() !== form || form.querySelector('textarea[placeholder="请输入公钥或点击下方按钮生成公私钥"]') !== publicKey) {
+            throw new Error("服务账号表单已发生变化，请在当前表单重新准备。");
+          }
+        };
+        const verifyRoles = () => {
+          verifyForm();
+          const currentLevel = h.byText('label,[role="radio"]', /^开发者级凭证\s*$/, form);
+          const currentAdmin = h.byText('label,[role="checkbox"]', /^APP管理员\s*$/, form);
+          const currentRoles = [...form.querySelectorAll('label.checkbox,[role="checkbox"]')];
+          if (checked(currentLevel) !== true) throw new Error("开发者级凭证状态已变化，请重新核对级别。");
+          if (checked(currentAdmin) !== true || currentRoles.some((el) => el !== currentAdmin && checked(el) !== false)) {
+            throw new Error("角色在准备期间已变化或无法确认，请核对 APP管理员及其他角色后再试。");
+          }
+        };
+        const knownPublicKey = () => {
+          verifyForm();
+          const generated = huaweiGeneratedPublicKeys.get(form.ownerDocument);
+          const sameForm = generated && generated.form === form;
+          const value = publicKey.value.trim();
+          if ((sameForm && value !== generated.key) || (value && !sameForm)) {
+            throw new Error("已有公钥的生成来源无法确认或公钥已被修改，请返回新建空白表单，或手动导入包含私钥的完整 JSON。");
+          }
+          return sameForm;
+        };
+        knownPublicKey();
         if (!(await h.ensureHook())) throw new Error("下载捕获尚未就绪，请重试；暂不生成公私钥。");
-        if (!sameForm) {
+        // 等待期间表单仍能变化，必须重新读取，不能用等待前的公钥和角色快照。
+        verifyRoles();
+        if (!knownPublicKey()) {
           const generate = h.byText("button", /^生成公私钥$/, form);
           if (!generate) throw new Error("没找到「生成公私钥」按钮，请确认当前表单。");
-          generate.click();
-          const key = await h.waitFor(() => getForm() === form && publicKey.value.trim(), 10000);
-          if (!key) throw new Error("生成公私钥后未得到公钥，请核对页面提示，不要直接确认创建。");
-          huaweiGeneratedPublicKeys.set(form.ownerDocument, { form, key });
+          const wasReadOnly = publicKey.readOnly;
+          try {
+            publicKey.readOnly = true;
+            generate.click();
+            const key = await h.waitFor(() => getForm() === form && publicKey.value.trim(), 10000);
+            if (!key) throw new Error("生成公私钥后未得到公钥，请核对页面提示，不要直接确认创建。");
+            verifyForm();
+            if (publicKey.value.trim() !== key) throw new Error("生成结果返回后公钥已变化，请重新核对公私钥。");
+            huaweiGeneratedPublicKeys.set(form.ownerDocument, { form, key });
+          } finally { publicKey.readOnly = wasReadOnly; }
         }
+        verifyRoles();
+        knownPublicKey();
         const ok = h.byText("button", /^确认$/, form);
         if (!ok) throw new Error("表单里没找到「确认」按钮。");
         h.highlight(ok);

@@ -135,3 +135,58 @@ test("华为：JSON 缺少私钥时提示生成公私钥，四字段输出仍兼
   assert.match(s.recipe.validate({ serviceAccountJson: JSON.stringify({ key_id: "k", sub_account: "sa" }) }), /private_key.*生成公私钥/);
   assert.deepEqual(s.recipe.finalize({ serviceAccountJson: JSON.stringify({ keyId: "k", subAccount: "sa", privateKey: "fake" }) }), { keyId: "k", subAccount: "sa", privateKey: "fake", projectId: "" });
 });
+
+test("华为：等待钩子期间填入未知公钥时停止，不覆盖", async () => {
+  const s = setupHuaweiPage({ page: "form" });
+  s.h.ensureHook = async () => { s.pub.value = "USER_PUBLIC_KEY"; return true; };
+  await assert.rejects(s.run, /公钥/);
+  assert.equal(s.pub.value, "USER_PUBLIC_KEY"); assert.equal(s.counters.generate, 0);
+});
+
+test("华为：重入等待钩子期间修改已生成公钥时不能提示就绪", async () => {
+  const s = setupHuaweiPage({ page: "form" });
+  await s.run(); s.events.length = 0;
+  s.h.ensureHook = async () => { s.pub.value = "CHANGED_DURING_HOOK"; return true; };
+  await assert.rejects(s.run, /公钥/);
+  assert.equal(s.counters.generate, 1); assert.equal(s.events.includes("highlight"), false);
+});
+
+test("华为：生成等待期间额外角色被选中时不能高亮确认", async () => {
+  const s = setupHuaweiPage({ page: "form" });
+  s.h.waitFor = async (fn) => {
+    const value = fn();
+    if (s.counters.generate) s.form.querySelectorAll("label.checkbox")[1].querySelector("span").className += " ant-checkbox-checked";
+    return value;
+  };
+  await assert.rejects(s.run, /角色/);
+  assert.equal(s.counters.confirm, 0); assert.equal(s.events.includes("highlight"), false);
+});
+
+test("华为：等待钩子期间表单离开时不向旧表单生成", async () => {
+  const s = setupHuaweiPage({ page: "form" });
+  s.h.ensureHook = async () => { s.form.ownerDocument.body.children = []; return true; };
+  await assert.rejects(s.run, /表单/);
+  assert.equal(s.counters.generate, 0);
+});
+
+test("华为：生成期间暂时只读公钥，完成后恢复编辑状态", async () => {
+  const s = setupHuaweiPage({ page: "form" }); s.pub.readOnly = false;
+  s.h.waitFor = async (fn) => {
+    const value = fn(); if (s.counters.generate) assert.equal(s.pub.readOnly, true); return value;
+  };
+  await s.run(); assert.equal(s.pub.readOnly, false);
+});
+
+test("华为：生成结果返回后公钥再变化时不提示就绪", async () => {
+  const s = setupHuaweiPage({ page: "form" });
+  s.h.waitFor = async (fn) => { const value = fn(); if (s.counters.generate) s.pub.value = "CHANGED_AFTER_GENERATION"; return value; };
+  await assert.rejects(s.run, /公钥/);
+  assert.equal(s.events.includes("highlight"), false);
+});
+
+test("华为：其他角色的混合勾选状态不可视为未勾选", async () => {
+  const s = setupHuaweiPage({ page: "form" });
+  s.form.querySelectorAll("label.checkbox")[1].attrs["aria-checked"] = "mixed";
+  await assert.rejects(s.run, /角色/);
+  assert.equal(s.counters.generate, 0);
+});
